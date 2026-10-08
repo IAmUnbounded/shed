@@ -1,0 +1,19 @@
+{
+  "name": "laya-task-plane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@receptron/laya": "^0.1.2",
+    "qrcode": "^1.5.4",
+    "web-push": "^3.6.7"
+  }
+}

@@ -1,0 +1,423 @@
+<title>Shed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Silkscreen&display=swap">
+<style>
+/* Layout: a shed at night. One dark field, a lit-up hero scene (phone signalling a Mac terminal), then calm sections set on a 1120px column. */
+:root {
+  --night: #131b17;
+  --night-raised: #1a241f;
+  --line: #2b3a32;
+  --cream: #efe6d4;
+  --muted: #a6b0a3;
+  --mint: #7ee2c0;
+  --roof: #d9774f;
+  --display: 'Bricolage Grotesque', 'Avenir Next', system-ui, sans-serif;
+  --body: 'IBM Plex Sans', -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+  --pixel: 'Silkscreen', 'IBM Plex Mono', monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--night); color: var(--cream); font: 400 16px/1.6 var(--body); -webkit-font-smoothing: antialiased; }
+a { color: inherit; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; border-radius: 4px; }
+.wrap { width: min(1120px, 100%); margin: 0 auto; padding-inline: 20px; }
+.pixel { font-family: var(--pixel); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--mint); }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h2 { font-size: clamp(30px, 4.2vw, 46px); line-height: 1.06; letter-spacing: -.02em; font-weight: 700; }
+h3 { font-size: 19px; line-height: 1.25; font-weight: 700; letter-spacing: -.01em; }
+p { margin: 0; }
+.lede { color: var(--muted); font-size: 18px; max-width: 60ch; }
+code, .mono { font-family: var(--mono); }
+.sprite { image-rendering: pixelated; shape-rendering: crispEdges; display: block; }
+
+/* Nav */
+.nav { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; background: color-mix(in srgb, var(--night) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.nav .wrap { display: flex; align-items: center; gap: 24px; height: 64px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+.brand svg { width: 32px; height: 32px; }
+.brand b { font: 800 22px/1 var(--display); letter-spacing: -.02em; }
+.nav-links { display: flex; gap: 22px; margin-left: auto; font-size: 14px; color: var(--muted); }
+.nav-links a { text-decoration: none; }
+.nav-links a:hover { color: var(--cream); }
+.nav-cta { text-decoration: none; font: 600 14px var(--body); background: var(--mint); color: var(--night); padding: 9px 14px; border-radius: 8px; white-space: nowrap; }
+
+/* Hero */
+.hero { padding-block: 72px 56px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr); gap: 48px; align-items: center; }
+.hero h1 { font-size: clamp(44px, 6.4vw, 78px); line-height: .98; letter-spacing: -.035em; font-weight: 800; margin: 18px 0 20px; }
+.hero h1 em { font-style: normal; color: var(--roof); }
+.hero .lede { font-size: 19px; }
+.hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+.btn { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; font: 600 15px var(--body); padding: 12px 18px; border-radius: 10px; border: 1px solid var(--line); color: var(--cream); background: var(--night-raised); }
+.btn.primary { background: var(--roof); border-color: var(--roof); color: #1b130e; }
+.btn:hover { border-color: var(--mint); }
+.harness-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; font: 500 12px var(--mono); color: var(--muted); }
+.harness-row span { border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; }
+
+/* Hero scene: phone sends, signal crosses, terminal runs it */
+.scene { position: relative; min-height: 540px; }
+.terminal { position: absolute; top: 0; right: 0; left: 168px; background: #0d1210; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 30px 80px #0008; overflow: hidden; }
+.terminal-bar { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line); font: 500 11px var(--mono); color: var(--muted); }
+.terminal-bar i { width: 10px; height: 10px; border-radius: 50%; background: #3a4740; }
+.terminal-bar span { margin-left: 8px; }
+.terminal pre { margin: 0; padding: 14px 16px 18px; font: 12.5px/1.6 var(--mono); color: #d9e4dc; white-space: pre-wrap; min-height: 230px; }
+.t-dim { color: #7d8b82; }
+.t-you { color: var(--cream); }
+.t-agent { color: var(--mint); }
+.t-ask { color: var(--roof); }
+.caret { display: inline-block; width: 7px; height: 14px; background: var(--mint); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+.phone { position: absolute; left: 0; bottom: 0; width: 196px; z-index: 2; border-radius: 30px; background: #f6efe2; color: #262520; padding: 12px; box-shadow: 0 30px 70px #000a, 0 0 0 8px #0b0f0d, 0 0 0 9px var(--line); }
+.phone-top { display: flex; justify-content: space-between; font: 600 10px var(--body); color: #6d6a62; padding: 2px 6px 8px; }
+.phone-card { background: #fffdf8; border: 1px solid #e3dccf; border-radius: 12px; padding: 8px 10px 10px; display: grid; gap: 2px; }
+.phone-card + .phone-card { margin-top: 8px; }
+.phone-card .stage { height: 52px; display: grid; place-items: center; border-bottom: 1px dashed #e3dccf; margin: 0 -10px 4px; }
+.phone-card b { font: 600 12px var(--body); }
+.phone-card small { font: 500 10px var(--mono); color: #4e7a62; }
+.phone-card small.ask { color: #b25b3d; }
+.phone-bar { margin-top: 10px; display: flex; align-items: center; gap: 6px; background: #fffdf8; border: 1px solid #ddd3c6; border-radius: 18px; padding: 5px 5px 5px 10px; font: 500 11px var(--body); }
+.phone-bar span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.phone-bar i { flex: none; width: 24px; height: 24px; border-radius: 50%; background: #a6573d; color: #fff; display: grid; place-items: center; font-style: normal; font-size: 12px; }
+.signal { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+.signal path { fill: none; stroke: var(--mint); stroke-width: 2; stroke-dasharray: 3 7; opacity: .55; }
+.packet { fill: var(--mint); animation: travel 3.6s ease-in-out infinite; offset-path: path('M98 238 C 98 150, 120 96, 168 92'); }
+
+/* Stats */
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.stat { padding: 26px 22px; display: grid; gap: 6px; }
+.stat + .stat { border-left: 1px solid var(--line); }
+.stat strong { font: 800 40px/1 var(--display); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 14px; }
+
+section { padding-block: 96px 0; }
+.section-head { display: grid; gap: 14px; margin-bottom: 40px; }
+
+/* Tour video */
+.tour-frame { position: relative; aspect-ratio: 16 / 9; max-width: 100%; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; background: #0d1210; display: grid; place-items: center; }
+.tour-frame video { width: 100%; height: 100%; display: block; }
+
+/* Steps */
+.steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; counter-reset: step; }
+.step { border: 1px solid var(--line); border-radius: 14px; padding: 22px; display: grid; gap: 10px; align-content: start; background: var(--night-raised); }
+.step .pixel { color: var(--roof); }
+.step p { color: var(--muted); font-size: 15px; }
+
+/* Agent moods */
+.moods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.mood { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.mood .stage { height: 150px; display: grid; place-items: center; background: linear-gradient(#1d2923, #17201b); border-bottom: 1px dashed var(--line); }
+.mood .stage svg { width: 150px; height: 125px; }
+.mood div.copy { padding: 18px 20px 22px; display: grid; gap: 6px; }
+.mood .state { font: 500 13px var(--mono); display: flex; align-items: center; gap: 8px; }
+.mood .state i { width: 8px; height: 8px; border-radius: 50%; }
+.mood p { color: var(--muted); font-size: 15px; }
+
+/* Features */
+.features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--line); }
+.feature { padding: 28px 26px 30px 0; display: grid; gap: 10px; align-content: start; border-bottom: 1px solid var(--line); }
+.feature:not(:nth-child(3n+1)) { padding-left: 26px; border-left: 1px solid var(--line); }
+.feature p { color: var(--muted); font-size: 15px; }
+.feature code { font-size: 13px; color: var(--mint); }
+
+/* Architecture */
+.arch { border: 1px solid var(--line); border-radius: 16px; padding: 28px; background: var(--night-raised); overflow-x: auto; }
+.arch-row { display: flex; align-items: stretch; gap: 0; min-width: 760px; }
+.node { flex: 1; border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 6px; align-content: start; background: var(--night); }
+.node b { font: 700 15px var(--display); }
+.node span { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.node .pixel { font-size: 10px; }
+.wire { flex: 0 0 80px; display: grid; place-items: center; position: relative; }
+.wire::before { content: ''; position: absolute; left: 6px; right: 6px; top: 50%; border-top: 2px dashed #3d5a4b; }
+.wire small { position: relative; background: var(--night-raised); padding: 2px 6px; font: 500 10px var(--mono); color: var(--mint); text-align: center; line-height: 1.3; }
+.agents-col { display: grid; gap: 6px; margin-top: 4px; }
+.agents-col span { font: 500 12px var(--mono); color: var(--cream); }
+
+/* Harness table */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+table { width: 100%; border-collapse: collapse; min-width: 640px; font-size: 14px; }
+th, td { text-align: left; padding: 14px 18px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 400 11px var(--pixel); letter-spacing: .08em; text-transform: uppercase; color: var(--mint); background: var(--night-raised); }
+tr:last-child td { border-bottom: 0; }
+td code { font-size: 12.5px; color: var(--muted); }
+td.yes { color: var(--mint); }
+
+/* FAQ */
+.faq { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 40px; }
+.faq details { border-top: 1px solid var(--line); padding: 18px 0; }
+.faq summary { cursor: pointer; font: 600 17px var(--display); list-style: none; display: flex; justify-content: space-between; gap: 16px; }
+.faq summary::after { content: '+'; color: var(--mint); font-family: var(--mono); }
+.faq details[open] summary::after { content: '–'; }
+.faq p { color: var(--muted); font-size: 15px; margin-top: 10px; max-width: 58ch; }
+
+/* Closing + footer */
+.closing { margin-top: 110px; border-top: 1px solid var(--line); padding-block: 80px; display: grid; justify-items: center; text-align: center; gap: 18px; }
+.closing svg { width: 84px; height: 84px; }
+.closing h2 { font-size: clamp(34px, 5vw, 58px); }
+footer { border-top: 1px solid var(--line); padding-block: 28px 40px; color: var(--muted); font-size: 13px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; justify-content: space-between; }
+footer a { color: var(--cream); }
+
+@keyframes blink { 50% { opacity: 0; } }
+@keyframes travel { 0% { offset-distance: 0%; opacity: 0; } 10% { opacity: 1; } 80% { opacity: 1; } 100% { offset-distance: 100%; opacity: 0; } }
+@keyframes px-hop { 50% { transform: translateY(-1px); } }
+@keyframes px-tap { 50% { transform: translateY(-1px); } }
+@keyframes px-steam { 0% { opacity: 0; transform: translateY(0); } 40% { opacity: 1; } 100% { opacity: 0; transform: translateY(-2px); } }
+@keyframes px-wave { 50% { transform: rotate(8deg); } }
+@keyframes beacon { 50% { opacity: .35; } }
+.sprite .sprite-body, .sprite .hand, .sprite .steam, .sprite .sign { transform-box: fill-box; }
+.working .sprite-body { animation: px-hop .5s steps(1) infinite; }
+.working .hand.l { animation: px-tap .24s steps(1) infinite; }
+.working .hand.r { animation: px-tap .24s steps(1) .12s infinite; }
+.open .sprite-body { animation: px-hop 2.4s steps(1) infinite; }
+.open .steam { animation: px-steam 1.8s steps(1) infinite; }
+.open .steam.s2 { animation-delay: .9s; }
+.asking .sign { transform-origin: 50% 100%; animation: px-wave .9s steps(1) infinite; }
+.beacon { animation: beacon 1.6s steps(1) infinite; }
+
+@media (max-width: 920px) {
+  .hero { grid-template-columns: 1fr; padding-block: 48px 40px; }
+  .scene { min-height: 540px; max-width: 600px; }
+  .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .feature, .feature:not(:nth-child(3n+1)) { padding: 26px 22px 28px 0; border-left: 0; }
+  .feature:nth-child(2n) { padding-left: 22px; border-left: 1px solid var(--line); }
+  .faq { grid-template-columns: 1fr; }
+  .nav-links { display: none; }
+  .nav-cta { margin-left: auto; }
+}
+@media (max-width: 620px) {
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat:nth-child(3) { border-left: 0; }
+  .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .steps, .moods, .features { grid-template-columns: 1fr; }
+  .feature, .feature:nth-child(2n) { padding: 24px 0; border-left: 0; }
+  .scene { min-height: 0; display: grid; gap: 18px; }
+  .terminal, .phone { position: relative; width: 100%; left: auto; }
+  .phone { width: 220px; justify-self: center; }
+  .signal { display: none; }
+  .terminal pre { min-height: 0; }
+  section { padding-block: 72px 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; }
+  .packet { display: none; }
+}
+</style>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Shed home"><svg class="sprite" data-sprite="shed" viewBox="0 0 20 20" aria-hidden="true"></svg><b>Shed</b></a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#agents">Agents</a>
+      <a href="#features">Features</a>
+      <a href="#harnesses">Harnesses</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <a class="nav-cta" href="#tour">Watch the tour</a>
+  </div>
+</header>
+
+<main id="top">
+  <div class="wrap hero">
+    <div>
+      <div class="pixel">Powered by Laya · Runs on your Mac</div>
+      <h1>Your coding agents, <em>in your pocket.</em></h1>
+      <p class="lede">Shed connects your phone to the Claude Code, Codex, Gemini, OpenCode and Pi sessions on your Mac. Send a message from anywhere. It runs in a real Terminal window on the Mac, where you can watch it work and approve its next step.</p>
+      <div class="hero-actions">
+        <a class="btn primary" href="#tour">Watch the 60-second tour ↓</a>
+        <a class="btn" href="#how">How it works</a>
+      </div>
+      <div class="harness-row" aria-label="Supported harnesses"><span>Claude Code</span><span>Codex</span><span>Gemini</span><span>OpenCode</span><span>Pi</span></div>
+    </div>
+
+    <div class="scene" aria-label="A phone sends a message to an agent running in a Mac terminal">
+      <div class="terminal" aria-hidden="true">
+        <div class="terminal-bar"><i></i><i></i><i></i><span>ttys003 · ~/harness-router-web</span></div>
+<pre><span class="t-dim">▗ ▗   ▖ ▖  Claude Code
+ ▘▘   ▝▝   Opus · ~/harness-router-web</span>
+
+<span class="t-you">❯ Fix the flaky login test</span>
+
+<span class="t-agent">⏺</span> The test races the session cookie.
+  Waiting for the cookie before the
+  redirect fixes it.
+
+<span class="t-ask">  Do you want to edit login.test.js?
+  ❯ 1. Yes</span>
+<span class="t-dim">    2. No</span> <span class="caret"></span></pre>
+      </div>
+      <svg class="signal" viewBox="0 0 560 540" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M98 238 C 98 150, 120 96, 168 92"/>
+        <rect class="packet" x="-4" y="-4" width="8" height="8"/>
+      </svg>
+      <div class="phone" aria-hidden="true">
+        <div class="phone-top"><span>9:41</span><span>Shed</span></div>
+        <div class="phone-card"><div class="stage"><svg class="sprite asking" data-sprite="claude" data-mood="asking" viewBox="0 0 24 20" width="62" height="52"></svg></div><b>harness-router-web</b><small class="ask">● Needs your OK</small></div>
+        <div class="phone-card"><div class="stage"><svg class="sprite working" data-sprite="codex" data-mood="working" viewBox="0 0 24 20" width="62" height="52"></svg></div><b>make-company</b><small>● Typing away</small></div>
+        <div class="phone-bar"><span>Fix the flaky login test</span><i>↑</i></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><strong>5</strong><span>coding harnesses, one inbox</span></div>
+      <div class="stat"><strong>0</strong><span>tokens spent on routing: Laya runs on your Mac</span></div>
+      <div class="stat"><strong>2s</strong><span>live terminal refresh on your phone</span></div>
+      <div class="stat"><strong>1</strong><span>QR scan to connect a phone</span></div>
+    </div>
+  </div>
+
+  <section id="tour">
+    <div class="wrap">
+      <div class="section-head"><div class="pixel">The tour</div><h2>What Shed is, in a minute.</h2></div>
+      <div class="tour-frame" id="tour-frame">
+        <video id="tour-video" src="shed-tour.mp4" poster="tour-poster.jpg" controls playsinline preload="metadata" aria-label="A one-minute tour of Shed"></video>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <div class="section-head"><div class="pixel">How it works</div><h2>Walk away from your desk. Keep shipping.</h2><p class="lede">Shed runs on your Mac and puts a secure link on your phone. Nothing about your agents changes: they keep running in the terminals you already use.</p></div>
+      <div class="steps">
+        <div class="step"><div class="pixel">Step 1</div><h3>Scan the code</h3><p>Shed shows a QR code on your Mac. Scan it, sign in with your Shed password, and add it to your home screen.</p></div>
+        <div class="step"><div class="pixel">Step 2</div><h3>Just message</h3><p>Type what you need. Pick an agent, or leave it on Auto and let Laya choose the harness and model.</p></div>
+        <div class="step"><div class="pixel">Step 3</div><h3>It runs in a real terminal</h3><p>The message lands in the Terminal tab that already holds the session, or a new window resumes it. Same model, same context.</p></div>
+        <div class="step"><div class="pixel">Step 4</div><h3>Watch and approve</h3><p>See the live terminal on your phone. When an agent asks permission, tap 1, 2 or 3. Tap Stop to interrupt.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="agents">
+    <div class="wrap">
+      <div class="section-head"><div class="pixel">Your desk at a glance</div><h2>Every live session is a little agent.</h2><p class="lede">Each harness has its own pixel character. You can tell what all of them are doing before you read a word.</p></div>
+      <div class="moods">
+        <div class="mood"><div class="stage"><svg class="sprite working" data-sprite="claude" data-mood="working" viewBox="0 0 24 20" aria-hidden="true"></svg></div><div class="copy"><div class="state" style="color: var(--mint)"><i style="background: var(--mint)"></i>Typing away</div><p>The agent is working. Open it to watch its terminal live.</p></div></div>
+        <div class="mood"><div class="stage"><svg class="sprite open" data-sprite="codex" data-mood="open" viewBox="0 0 24 20" aria-hidden="true"></svg></div><div class="copy"><div class="state" style="color: var(--muted)"><i style="background: var(--muted)"></i>Waiting for you</div><p>The turn is done and the agent is sipping coffee until your next message.</p></div></div>
+        <div class="mood"><div class="stage"><svg class="sprite asking" data-sprite="gemini" data-mood="asking" viewBox="0 0 24 20" aria-hidden="true"></svg></div><div class="copy"><div class="state" style="color: var(--roof)"><i style="background: var(--roof)"></i>Needs your OK</div><p>A permission prompt is waiting. Shed reads it from the terminal and moves the agent to the front.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="section-head"><div class="pixel">What you get</div><h2>Built for agents that run for hours.</h2></div>
+      <div class="features">
+        <div class="feature"><h3>The same terminal, not a copy</h3><p>Follow-ups are typed into the Terminal tab that holds the session, so you see the exact screen when you get back to your Mac.</p></div>
+        <div class="feature"><h3>Local routing with Laya</h3><p>An open-source decision model on your Mac picks the harness and model. It must be at least <code>60%</code> sure before it moves a conversation to a different agent.</p></div>
+        <div class="feature"><h3>Approve from your phone</h3><p>Stop, switch permission mode, or answer a prompt with one tap. With normal permissions, nothing runs without your OK.</p></div>
+        <div class="feature"><h3>Replies survive restarts</h3><p>Claude and Codex run in Terminal windows, and Shed tracks their transcripts. A restart of Shed never cuts a reply short.</p></div>
+        <div class="feature"><h3>Types only into the agent</h3><p>Shed checks that the agent is still the foreground program before it types and again before it presses Return. A message never runs as a shell command.</p></div>
+        <div class="feature"><h3>Yours, on your Mac</h3><p>A password-protected link through your own tunnel. Sessions, transcripts and routing stay on your Mac; only the agents talk to their model providers.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="architecture">
+    <div class="wrap">
+      <div class="section-head"><div class="pixel">Under the roof</div><h2>A small server between your phone and your terminals.</h2></div>
+      <div class="arch" role="img" aria-label="Phone connects over an HTTPS tunnel to Shed on the Mac, which uses Laya to route messages into Terminal sessions for each agent">
+        <div class="arch-row">
+          <div class="node"><div class="pixel">Anywhere</div><b>Your phone</b><span>Home-screen web app. Message bar, live agents, terminal view.</span></div>
+          <div class="wire"><small>HTTPS<br>tunnel</small></div>
+          <div class="node"><div class="pixel">Your Mac</div><b>Shed</b><span>Finds sessions, tracks transcripts, checks each harness's login, mirrors terminals.</span></div>
+          <div class="wire"><small>local<br>ONNX</small></div>
+          <div class="node"><div class="pixel">Routing</div><b>Laya</b><span>Chooses stay or hand off, harness and model. No API key, no tokens.</span></div>
+          <div class="wire"><small>Terminal<br>.app</small></div>
+          <div class="node"><div class="pixel">Agents</div><b>Your harnesses</b><div class="agents-col"><span>Claude Code</span><span>Codex</span><span>Gemini · OpenCode · Pi</span></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="harnesses">
+    <div class="wrap">
+      <div class="section-head"><div class="pixel">Harness support</div><h2>Bring the agents you already use.</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Harness</th><th>Finds sessions in</th><th>Runs in Terminal</th><th>Resumes with</th></tr></thead>
+          <tbody>
+            <tr><td>Claude Code</td><td><code>~/.claude/projects</code></td><td class="yes">Yes, typed into the open tab</td><td><code>claude --resume</code></td></tr>
+            <tr><td>Codex</td><td><code>~/.codex/sessions</code></td><td class="yes">Yes, or queued to the Codex app</td><td><code>codex resume</code></td></tr>
+            <tr><td>Gemini</td><td><code>~/.gemini/tmp/*/chats</code></td><td>In the background</td><td><code>gemini --resume</code></td></tr>
+            <tr><td>OpenCode</td><td><code>opencode session list</code></td><td>In the background</td><td><code>opencode run --session</code></td></tr>
+            <tr><td>Pi</td><td><code>~/.pi/agent/sessions</code></td><td>In the background</td><td><code>pi --session</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="wrap">
+      <div class="section-head"><div class="pixel">Questions</div><h2>Before you leave your desk.</h2></div>
+      <div class="faq">
+        <details open><summary>Is Shed an app I install from the App Store?</summary><p>No. It is a web app served by your Mac. Scan the QR code, sign in, and add it to your home screen; it opens full screen with the Shed icon.</p></details>
+        <details><summary>Does my code leave my Mac?</summary><p>Shed itself keeps everything on your Mac: sessions, transcripts and routing. Your agents still send prompts to their own model providers, exactly as they do when you use them at your desk.</p></details>
+        <details><summary>What happens when an agent asks for permission?</summary><p>Its pixel agent switches to "Needs your OK" and moves to the front. Open the Terminal tab and tap 1, 2 or 3, the same answer you would type at the Mac.</p></details>
+        <details><summary>Can Shed start new sessions, or only continue old ones?</summary><p>Both. Send a message with no session and Shed opens a new Terminal window for the harness Laya picks, in a project you choose.</p></details>
+        <details><summary>What does Laya do?</summary><p>Laya is an open-source decision model that runs locally. It picks the harness and model for new work, and decides whether a follow-up should stay in its session or move to a better-suited agent.</p></details>
+        <details><summary>Does the Mac have to stay on?</summary><p>Yes. The agents run on your Mac, so it needs to be awake and online. Shed starts automatically when you sign in.</p></details>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap closing">
+    <svg class="sprite" data-sprite="shed" viewBox="0 0 20 20" aria-hidden="true"></svg>
+    <h2>Your desk, in your pocket.</h2>
+    <p class="lede">Shed runs on your Mac and works with the coding agents you already have.</p>
+    <a class="btn primary" href="#tour">Watch the tour</a>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Shed · powered by <a href="https://github.com/NandhaKishorM/laya">Laya</a>, the open-source decision model, via <a href="https://github.com/receptron/laya">@receptron/laya</a></span>
+    <span>Runs on macOS with Terminal.app</span>
+  </div>
+</footer>
+
+<script>
+// Pixel sprites shared with the Shed app: rows of single-letter colors, '.' is empty.
+const SPRITES = {
+  shed: { w:20, colors:{ R:'#d9774f', L:'#a6573d', W:'#f6eedd', P:'#e7dac2', T:'#8a5a3c', D:'#1e1c19', E:'#7ee2c0', A:'#b9ae9c', M:'#7ee2c0', S:'#5fae92', G:'#2a3229' }, tile:'#374238', x:2, y:1, rows:[
+    '..........S.M.S.', '.......RRS..A..S', '......RRRR..A...', '.....RRRRRR.A...', '....RRRRRRRRA...', '...RRRRRRRRRR...', '..RRRRRRRRRRRR..', '.LLLLLLLLLLLLLL.',
+    '..WPWPWPWPWPWP..', '..WPTTTTTTTTWP..', '..WPTDDDDDDTWP..', '..WPTDEDDEDTWP..', '..WPTDDDDDDTWP..', '..WPTDDDDDDTWP..', '..WPTDDDDDDTWP..'] },
+  claude: { colors:{ B:'#da7758', E:'#1d1a17' }, rows:['................', '...BBBBBBBBBB...', '...BBBBBBBBBB...', '...BBEBBBBEBB...', '...BBEBBBBEBB...', '.BBBBBBBBBBBBBB.', '.BBBBBBBBBBBBBB.', '...BBBBBBBBBB...', '...BBBBBBBBBB...', '....B.B..B.B....', '....B.B..B.B....'] },
+  codex: { colors:{ B:'#2d2f33', E:'#7ee2c0', D:'#7ee2c0', H:'#10a37f', A:'#8e8ea0' }, rows:['.......H........', '.......A........', '...BBBBBBBBBB...', '..BBBBBBBBBBBB..', '..BBBEBBBBEBBB..', '..BBBEBBBBEBBB..', '..BBBBBBBBBBBB..', '..BBBBDBBDBBBB..', '...BBBBDDBBBB...', '.....BB..BB.....', '.....BB..BB.....'] },
+  gemini: { colors:{ B:['#4c8df6', '#8f6cf6'], E:'#ffffff' }, rows:['.......BB.......', '......BBBB......', '.....BBBBBB.....', '...BBBBBBBBBB...', '.BBBBEBBBBEBBBB.', 'BBBBBEBBBBEBBBBB', '.BBBBBBBBBBBBBB.', '...BBBBBBBBBB...', '.....BBBBBB.....', '......BBBB......', '.......BB.......'] },
+};
+const mix = (a, b, t) => { const p = c => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16)); const [x, y] = [p(a), p(b)]; return `rgb(${x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(',')})`; };
+function rects(rows, colors, x0, y0) {
+  let out = '';
+  rows.forEach((row, y) => {
+    for (let x = 0; x < row.length;) {
+      const k = row[x];
+      if (k === '.') { x++; continue; }
+      let e = x; while (row[e + 1] === k) e++;
+      const fill = Array.isArray(colors[k]) ? mix(colors[k][0], colors[k][1], y / (rows.length - 1)) : colors[k];
+      out += `<rect${k === 'M' ? ' class="beacon"' : ''} x="${x0 + x}" y="${y0 + y}" width="${e - x + 1}" height="1" fill="${fill}"/>`;
+      x = e + 1;
+    }
+  });
+  return out;
+}
+const props = body => ({
+  working:`<rect x="7" y="12" width="10" height="5" fill="#2c2b27"/><rect x="8" y="13" width="8" height="3" fill="#a6e8bd"/><rect x="9" y="14" width="2" height="1" fill="#2c2b27"/><rect x="5" y="17" width="14" height="1" fill="#57534a"/><rect class="hand l" x="6" y="16" width="2" height="1" fill="${body}"/><rect class="hand r" x="16" y="16" width="2" height="1" fill="${body}"/>`,
+  open:`<rect x="19" y="14" width="3" height="4" fill="#d8ccb6"/><rect x="19" y="14" width="3" height="1" fill="#8a6a4f"/><rect x="22" y="15" width="1" height="2" fill="#d8ccb6"/><rect class="steam s1" x="20" y="12" width="1" height="1" fill="#b3ab9c"/><rect class="steam s2" x="21" y="11" width="1" height="1" fill="#b3ab9c"/>`,
+  asking:`<g class="sign"><rect x="18" y="0" width="5" height="6" fill="#c2603f"/><rect x="17" y="1" width="7" height="4" fill="#c2603f"/><rect x="18" y="6" width="1" height="1" fill="#c2603f"/><rect x="20" y="1" width="1" height="2" fill="#fff"/><rect x="20" y="4" width="1" height="1" fill="#fff"/></g>`,
+});
+document.querySelectorAll('svg[data-sprite]').forEach(svg => {
+  const sprite = SPRITES[svg.dataset.sprite];
+  svg.setAttribute('shape-rendering', 'crispEdges');
+  if (svg.dataset.sprite === 'shed') {
+    svg.innerHTML = `<rect width="20" height="20" rx="4" fill="${sprite.tile}"/>${rects(sprite.rows, sprite.colors, sprite.x, sprite.y)}<rect x="3" y="16" width="14" height="1" fill="#2a3229"/>`;
+    return;
+  }
+  const body = Array.isArray(sprite.colors.B) ? sprite.colors.B[1] : sprite.colors.B;
+  svg.innerHTML = `<rect x="5" y="18" width="14" height="1" fill="#00000030"/><g class="sprite-body">${rects(sprite.rows, sprite.colors, 4, 4)}</g>${props(body)[svg.dataset.mood] || ''}`;
+});
+</script>

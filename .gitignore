@@ -1,0 +1,16 @@
+# Secrets and local state: the master token, password hash, devices, push keys, tasks
+.jev-token
+.laya-token
+.jev-data/
+
+# Dependencies (video/node_modules is a symlink, so no trailing slash)
+node_modules
+
+# Generated output
+output/
+video/out/
+.playwright-cli/
+
+# OS noise
+.DS_Store
+*.log

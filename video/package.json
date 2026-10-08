@@ -1,0 +1,9 @@
+{
+  "name": "shed-tour",
+  "private": true,
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts ShedTour out/shed-tour.mp4 --codec h264 --crf 20 --concurrency 4",
+    "still": "remotion still src/index.ts ShedTour out/still.png"
+  }
+}
