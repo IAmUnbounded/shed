@@ -539,3 +539,11 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 .chat-topic { margin: 0; color: var(--muted); font: 400 14px/1.45 var(--sans); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .chat-head .drawer-path { margin: 0; font-size: 11.5px; }
 @media (max-width: 700px) { .chat-head .drawer-title { font-size: 20px; } .chat-topic { font-size: 14.5px; } }
+
+/* Drawer header: harness icon and status on one line everywhere */
+#drawer-harness { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#drawer-harness span { margin-left: 0 !important; vertical-align: baseline !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A sent message waiting to show up in the transcript */
+.message.pending .message-body { opacity: .85; }
+.pending-status { margin-top: 6px; font: 500 12px var(--mono); color: var(--green); text-align: right; }
+.message.pending.failed .pending-status { color: var(--accent); }

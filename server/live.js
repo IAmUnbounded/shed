@@ -8,18 +8,31 @@ const askingPatterns = {
   claude:/Do you want to|Esc to cancel|Enter to confirm|❯\s*1\./,
   codex:/Would you like to|Allow .*\?|Press enter to confirm|esc to cancel|[›❯]\s*1\.\s/i,
 };
-// Reading a Terminal window takes about 0.3 seconds, so each answer is reused briefly.
-const askingCache = new Map();
-export function terminalIsAsking(tty, harness) {
-  if (!tty || !askingPatterns[harness]) return false;
-  const key = `${tty}:${harness}`, hit = askingCache.get(key);
-  if (hit && Date.now() - hit.at < 8000) return hit.asking;
-  let asking = false;
-  try { asking = askingPatterns[harness].test(readTerminal(tty, 14) || ''); } catch {}
-  askingCache.set(key, { at:Date.now(), asking });
-  return asking;
+// Mid-turn, both CLIs show "esc to interrupt" in their footer, even while waiting on their own tools or background work.
+const activePattern = /esc to interrupt|Working \(/i;
+// Reading a Terminal window takes about 0.3 seconds, so each reading is reused briefly.
+const screenCache = new Map();
+export function terminalState(tty, harness) {
+  if (!tty || !askingPatterns[harness]) return { asking:false, active:false };
+  const key = `${tty}:${harness}`, hit = screenCache.get(key);
+  if (hit && Date.now() - hit.at < 8000) return hit.state;
+  let state = { asking:false, active:false };
+  try {
+    const screen = readTerminal(tty, 14) || '';
+    state = { asking:askingPatterns[harness].test(screen), active:activePattern.test(screen) };
+  } catch {}
+  screenCache.set(key, { at:Date.now(), state });
+  return state;
 }
-const claudeIsAsking = tty => terminalIsAsking(tty, 'claude');
+export const terminalIsAsking = (tty, harness) => terminalState(tty, harness).asking;
+// Claude's own status: busy (mid-turn), waiting (needs the person's input) or idle. Its footer covers the gaps,
+// such as a turn that is waiting on its own background work.
+function claudeLiveState(info) {
+  if (info.status === 'waiting') return 'asking';
+  const screen = terminalState(info.tty, 'claude');
+  if (screen.asking) return 'asking';
+  return info.status === 'busy' || screen.active ? 'working' : 'open';
+}
 
 const names = new Set(['codex', 'claude', 'gemini', 'pi', 'opencode']);
 
@@ -104,10 +117,11 @@ export function liveSessionStates(sessions) {
     const pid = session.file && files.get(session.file);
     const claudeLive = session.harness === 'claude' && claude.get(session.nativeId);
     if (claudeLive) {
-      states.set(session.id, { liveState:claudeIsAsking(claudeLive.tty) ? 'asking' : claudeLive.status === 'busy' ? 'working' : 'open', livePid:claudeLive.pid, tty:claudeLive.tty });
+      states.set(session.id, { liveState:claudeLiveState(claudeLive), livePid:claudeLive.pid, tty:claudeLive.tty });
     } else if (pid && processes.get(pid) === session.harness) {
       const tty = ttyOf(pid);
-      states.set(session.id, { liveState:session.harness === 'codex' ? (terminalIsAsking(tty, 'codex') ? 'asking' : codexWorkState(session.file)) : Date.now() - Date.parse(session.updatedAt) < 90000 ? 'working' : 'open', livePid:pid, tty });
+      const screen = session.harness === 'codex' ? terminalState(tty, 'codex') : null;
+      states.set(session.id, { liveState:session.harness === 'codex' ? (screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file)) : Date.now() - Date.parse(session.updatedAt) < 90000 ? 'working' : 'open', livePid:pid, tty });
     } else if (session.harness === 'opencode' && statuses.has(session.nativeId)) {
       const status = statuses.get(session.nativeId);
       states.set(session.id, { liveState:status?.type === 'busy' ? 'working' : 'open' });

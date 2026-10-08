@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript } from './sessions.js';
-import { codexWorkState, terminalIsAsking } from './live.js';
+import { codexWorkState, terminalIsAsking, terminalState } from './live.js';
 import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground } from './terminal.js';
 import { rankSessions } from './router.js';
 import { decideRoute, decideFollowup, decideModel, probeLaya, getLaya, layaStatus } from './laya.js';
@@ -138,7 +138,9 @@ function withCodexTerminals(list) {
   if (!terminals.size) return list;
   return list.map(session => {
     const tty = session.harness === 'codex' && !session.tty && terminals.get(session.nativeId);
-    return tty ? { ...session, tty, liveState:terminalIsAsking(tty, 'codex') ? 'asking' : codexWorkState(session.file) } : session;
+    if (!tty) return session;
+    const screen = terminalState(tty, 'codex');
+    return { ...session, tty, liveState:screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file) };
   });
 }
 // A new Claude or Codex window can stop at a startup question (trust this folder, install an update, pick an option)
