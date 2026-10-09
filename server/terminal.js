@@ -69,16 +69,57 @@ function osascript(script, args) {
 
 const findTab = `
 on findTab(ttyName)
-  tell application "Terminal"
-    repeat with w in windows
-      repeat with t in tabs of w
-        -- Finished tabs keep their old tty name, which macOS reuses for new windows.
-        if tty of t is ttyName and (count of processes of t) > 0 then return t
+  if application "Terminal" is running then
+    tell application "Terminal"
+      repeat with w in windows
+        repeat with t in tabs of w
+          -- Finished tabs keep their old tty name, which macOS reuses for new windows.
+          if tty of t is ttyName and (count of processes of t) > 0 then return t
+        end repeat
       end repeat
-    end repeat
-  end tell
+    end tell
+  end if
   return missing value
 end findTab
+
+-- iTerm is checked only when running, so a lookup never launches it.
+on findITermSession(ttyName)
+  if application "iTerm" is running then
+    tell application "iTerm"
+      repeat with w in windows
+        repeat with t in tabs of w
+          repeat with s in sessions of t
+            if tty of s is ttyName then return s
+          end repeat
+        end repeat
+      end repeat
+    end tell
+  end if
+  return missing value
+end findITermSession
+
+-- Like do script, write text ends with Return.
+on sendToTab(ttyName, txt)
+  set t to findTab(ttyName)
+  if t is not missing value then
+    tell application "Terminal" to do script txt in t
+    return "ok"
+  end if
+  set s to findITermSession(ttyName)
+  if s is missing value then return "missing"
+  tell application "iTerm" to tell s to write text txt
+  return "ok"
+end sendToTab
+
+on tabHistory(ttyName)
+  set t to findTab(ttyName)
+  if t is not missing value then
+    tell application "Terminal" to return history of t
+  end if
+  set s to findITermSession(ttyName)
+  if s is missing value then return "__TAB_MISSING__"
+  tell application "iTerm" to return contents of s
+end tabHistory
 `;
 
 // `do script ... in tab` types into whatever program holds the tab, then presses Return.
@@ -91,10 +132,7 @@ export function typeIntoTerminal(tty, text, { prompt = false, agent = '' } = {})
   const send = value => {
     const result = osascript(`${findTab}
 on run argv
-  set t to findTab(item 1 of argv)
-  if t is missing value then return "missing"
-  tell application "Terminal" to do script (item 2 of argv) in t
-  return "ok"
+  return sendToTab(item 1 of argv, item 2 of argv)
 end run`, [tty, value]);
     if (result !== 'ok') throw new Error('That Terminal tab is no longer open.');
   };
@@ -109,9 +147,7 @@ end run`, [tty, value]);
 export function readTerminal(tty, maxLines = 400) {
   const text = osascript(`${findTab}
 on run argv
-  set t to findTab(item 1 of argv)
-  if t is missing value then return "__TAB_MISSING__"
-  tell application "Terminal" to return history of t
+  return tabHistory(item 1 of argv)
 end run`, [tty]);
   if (text === '__TAB_MISSING__') return null;
   return text.replace(/\s+$/, '').split('\n').slice(-maxLines).join('\n');
@@ -156,9 +192,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 export async function readTerminalAsync(tty, maxLines = 400) {
   const text = await osascriptAsync(`${findTab}
 on run argv
-  set t to findTab(item 1 of argv)
-  if t is missing value then return "__TAB_MISSING__"
-  tell application "Terminal" to return history of t
+  return tabHistory(item 1 of argv)
 end run`, [tty]);
   if (text === '__TAB_MISSING__') return null;
   return text.replace(/\s+$/, '').split('\n').slice(-maxLines).join('\n');
@@ -169,10 +203,7 @@ export async function typeIntoTerminalAsync(tty, text, { prompt = false, agent =
   const send = async value => {
     const result = await osascriptAsync(`${findTab}
 on run argv
-  set t to findTab(item 1 of argv)
-  if t is missing value then return "missing"
-  tell application "Terminal" to do script (item 2 of argv) in t
-  return "ok"
+  return sendToTab(item 1 of argv, item 2 of argv)
 end run`, [tty, value]);
     if (result !== 'ok') throw new Error('That Terminal tab is no longer open.');
   };
