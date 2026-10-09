@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript } from './sessions.js';
-import { codexWorkState, terminalIsAsking, terminalState } from './live.js';
+import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState } from './live.js';
 import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync } from './terminal.js';
 import { rankSessions } from './router.js';
 import { decideRoute, decideFollowup, decideModel, probeLaya, getLaya, layaStatus } from './laya.js';
@@ -243,6 +243,44 @@ function refreshTerminalTasks() {
   if (changed) saveTasks();
   for (const task of running) if (task.status === 'failed' && task.undelivered && task.handoffFrom) returnToOrigin(task);
 }
+// Live status: every 2 seconds Shed re-reads each live agent's state (Claude's status files, Codex's transcript, and a
+// background reading of each Terminal footer, none of which blocks) and pushes any change to open pages at once.
+const eventClients = new Set();
+function broadcast(event, data) {
+  const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const res of eventClients) res.write(message);
+}
+setInterval(() => { for (const res of eventClients) res.write(': still here\n\n'); }, 20000).unref();
+const announcedLive = new Set();
+let lastListedLive = new Set();
+function refreshLiveStatus() {
+  const list = sessions();
+  const byId = new Map(list.map(session => [session.id, session]));
+  const now = new Map();
+  for (const [id, info] of claudeLiveSessions()) now.set(`claude:${id}`, claudeLiveState(info));
+  for (const session of list) {
+    if (session.harness !== 'codex' || session.liveState === 'history' || !session.tty) continue;
+    const screen = terminalState(session.tty, 'codex');
+    now.set(session.id, screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file));
+  }
+  // A Claude session that started or closed changes the list itself, so pages fetch it again.
+  // Each new one is announced once (its transcript may not exist yet, so it can stay missing from the list for a while).
+  const appeared = [...now.keys()].filter(id => !byId.has(id) && !announcedLive.has(id));
+  appeared.forEach(id => announcedLive.add(id));
+  const closed = list.some(s => s.harness === 'claude' && s.liveState !== 'history' && !now.has(s.id));
+  // A live session whose transcript has just appeared in the list is news for open pages too.
+  const listedLive = new Set(list.filter(s => now.has(s.id)).map(s => s.id));
+  const newlyListed = [...listedLive].some(id => !lastListedLive.has(id));
+  lastListedLive = listedLive;
+  if (appeared.length || closed || newlyListed) { if (appeared.length || closed) sessions(true); return broadcast('sessions', {}); }
+  const changes = [];
+  for (const [id, liveState] of now) {
+    const session = byId.get(id);
+    if (session && session.liveState !== liveState) { session.liveState = liveState; changes.push({ id, liveState }); }
+  }
+  if (changes.length) broadcast('status', changes);
+}
+setInterval(() => { try { refreshLiveStatus(); } catch (error) { console.error(`Live status failed: ${error.message}`); } }, 2000).unref();
 // Runs whether or not anyone has Shed open: keeps task progress current and sends push notifications for
 // finished tasks and for agents that start waiting on a permission prompt.
 const seen = { tasks:null, asking:null, at:0 };
@@ -505,6 +543,7 @@ const loginCommands = { codex:['codex', 'login'], claude:['claude', 'auth', 'log
 const loginTerminals = new Map();
 
 // Claude runs in a visible Terminal: typed into the tab that already holds the session, or a new window that resumes it.
+const QUESTION_ON_SCREEN = /Do you want to|Esc to cancel|Enter to confirm|❯\s*1\.|›\s*1\.\s|Would you like to|Press enter to confirm|trust this folder/i;
 // The request returns as soon as the task exists; typing into Terminal (about a second of AppleScript and a pause)
 // runs in the background, so sending feels instant and the server keeps answering other requests meanwhile.
 function startTerminalTask(task, route, modelDecision, cwd, agentPrompt, skipPermissions) {
@@ -519,6 +558,9 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
     // Only type into a session's window while the agent is still running there; otherwise resume it in a new window.
     if (session?.tty && agentInForeground(session.tty, task.harness)) {
       Object.assign(task, { tty:session.tty });
+      // Never type a message while the agent shows a question: the Return would pick whatever option is highlighted
+      // (for example "No, exit" on Claude's folder-trust question).
+      if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`${label} is waiting for an answer in its Terminal. Answer it from the Terminal tab first, then send your message again.`);
       await typeIntoTerminalAsync(session.tty, agentPrompt, { prompt:true, agent:task.harness });
       Object.assign(task, { tty:session.tty, transcriptFile:session.file, [task.harness === 'codex' ? 'nativeSessionId' : 'claudeSessionId']:session.nativeId, permissions:'terminal', output:`Typed into the open Terminal tab. Waiting for ${label} to pick it up.` });
     } else if (task.harness === 'codex') {
@@ -731,6 +773,13 @@ const server = http.createServer(async (req, res) => {
       const current = deviceFor(req);
       settings = { ...settings, devices:devices().filter(d => d.id === current?.id) }; saveSettings();
       return send(res, 200, { ok:true });
+    }
+    if (pathname === '/api/events' && req.method === 'GET') {
+      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type':'text/event-stream; charset=utf-8', 'Cache-Control':'no-store', 'Connection':'keep-alive', 'X-Accel-Buffering':'no' });
+      res.write('retry: 3000\n\n');
+      eventClients.add(res);
+      req.on('close', () => eventClients.delete(res));
+      return;
     }
     if (pathname === '/api/sessions' && req.method === 'GET') return sendVersioned(req, res, { sessions: sessions().map(publicSession) });
     if (pathname === '/api/push' && req.method === 'GET') {

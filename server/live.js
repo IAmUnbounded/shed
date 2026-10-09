@@ -11,14 +11,14 @@ const askingPatterns = {
 // Mid-turn, both CLIs show "esc to interrupt" in their footer, even while waiting on their own tools or background work.
 const activePattern = /esc to interrupt|Working \(/i;
 // Reading a Terminal window takes about 0.3 seconds. Readings are refreshed in the background (at most every
-// 8 seconds per window) and the last one is returned straight away, so session discovery never waits on Terminal.
+// 3 seconds per window) and the last one is returned straight away, so session discovery never waits on Terminal.
 const screenCache = new Map();
 export function terminalState(tty, harness) {
   if (!tty || !askingPatterns[harness]) return { asking:false, active:false };
   const key = `${tty}:${harness}`;
   let entry = screenCache.get(key);
   if (!entry) { entry = { at:0, state:{ asking:false, active:false }, pending:false }; screenCache.set(key, entry); }
-  if (!entry.pending && Date.now() - entry.at > 8000) {
+  if (!entry.pending && Date.now() - entry.at > 3000) {
     entry.pending = true;
     readTerminalAsync(tty, 14)
       .then(screen => { entry.state = { asking:askingPatterns[harness].test(screen || ''), active:activePattern.test(screen || '') }; })
@@ -30,7 +30,7 @@ export function terminalState(tty, harness) {
 export const terminalIsAsking = (tty, harness) => terminalState(tty, harness).asking;
 // Claude's own status: busy (mid-turn), waiting (needs the person's input) or idle. Its footer covers the gaps,
 // such as a turn that is waiting on its own background work.
-function claudeLiveState(info) {
+export function claudeLiveState(info) {
   if (info.status === 'waiting') return 'asking';
   const screen = terminalState(info.tty, 'claude');
   if (screen.asking) return 'asking';

@@ -23,10 +23,16 @@ function processAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
 
+// A process keeps its terminal for life, so the answer is cached (briefly, in case the PID is reused).
+const ttyCache = new Map();
 export function ttyOf(pid) {
+  const hit = ttyCache.get(pid);
+  if (hit && Date.now() - hit.at < 60000) return hit.tty;
   const result = spawnSync('/bin/ps', ['-o', 'tty=', '-p', String(pid)], { encoding:'utf8', timeout:2000 });
   const name = (result.stdout || '').trim();
-  return /^ttys\d+$/.test(name) ? `/dev/${name}` : '';
+  const tty = /^ttys\d+$/.test(name) ? `/dev/${name}` : '';
+  ttyCache.set(pid, { at:Date.now(), tty });
+  return tty;
 }
 
 // True when `command` is the foreground program in that terminal, so typed text goes to it and not to the shell.
