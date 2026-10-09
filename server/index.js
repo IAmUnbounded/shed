@@ -344,6 +344,18 @@ const SECURITY_HEADERS = {
   'Permissions-Policy':'camera=(), microphone=(), geolocation=()',
   'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
 };
+// Polled data carries a short version tag. When the page already has that version, the reply is just {"same":true},
+// so a phone re-downloads and re-renders only what changed.
+function sendVersioned(req, res, value) {
+  const body = JSON.stringify(value);
+  const v = crypto.createHash('sha1').update(body).digest('base64url').slice(0, 16);
+  if (new URL(req.url, 'http://x').searchParams.get('v') === v) return send(res, 200, { same:true, v });
+  res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' });
+  res.end(`${body.slice(0, -1)},"v":"${v}"}`);
+}
+// Lists only need what a row shows; the full task (reply text and all) loads when one is opened.
+const taskSummary = t => ({ id:t.id, title:t.title, status:t.status, harness:t.harness, sessionId:t.sessionId, cwd:t.cwd, createdAt:t.createdAt, updatedAt:t.updatedAt, delivery:t.delivery, tty:t.tty, waitingOn:t.waitingOn, handoffFrom:t.handoffFrom, returnedTo:t.returnedTo, model:t.model, modelSource:t.modelSource, routeSource:t.routeSource, error:(t.error || '').slice(0, 300) });
+const publicTask = ({ agentPrompt, transcriptFile, claudeSessionId, nativeSessionId, submitRetries, lastSubmitRetry, waitNotified, ...rest }) => rest;
 function send(res, status, value, headers = {}) {
   const data = JSON.stringify(value);
   res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
@@ -720,7 +732,7 @@ const server = http.createServer(async (req, res) => {
       settings = { ...settings, devices:devices().filter(d => d.id === current?.id) }; saveSettings();
       return send(res, 200, { ok:true });
     }
-    if (pathname === '/api/sessions' && req.method === 'GET') return send(res, 200, { sessions: sessions().map(publicSession) });
+    if (pathname === '/api/sessions' && req.method === 'GET') return sendVersioned(req, res, { sessions: sessions().map(publicSession) });
     if (pathname === '/api/push' && req.method === 'GET') {
       const endpoint = new URL(req.url, 'http://x').searchParams.get('endpoint') || '';
       return send(res, 200, { publicKey:pushPublicKey(), subscribed:endpoint ? isSubscribed(endpoint) : false, devices:pushCount(), prefs:notifyPrefs() });
@@ -766,7 +778,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') {
         const text = await readTerminalAsync(tty);
         if (text === null) { loginTerminals.delete(name); return send(res, 404, { error:'The sign-in window was closed.' }); }
-        return send(res, 200, { tty, text });
+        return sendVersioned(req, res, { tty, text });
       }
       if (req.method === 'POST') {
         const input = await body(req);
@@ -783,7 +795,7 @@ const server = http.createServer(async (req, res) => {
       if (!task?.tty) return send(res, 404, { error:'This task has no Terminal window.' });
       if (req.method === 'GET') {
         const text = await readTerminalAsync(task.tty);
-        return text === null ? send(res, 404, { error:'That Terminal window is closed.' }) : send(res, 200, { tty:task.tty, text });
+        return text === null ? send(res, 404, { error:'That Terminal window is closed.' }) : sendVersioned(req, res, { tty:task.tty, text });
       }
       if (req.method === 'POST') {
         const input = await body(req);
@@ -803,7 +815,7 @@ const server = http.createServer(async (req, res) => {
       if (!session.tty) return send(res, 404, { error:'This session is not open in a Terminal tab.' });
       if (req.method === 'GET') {
         const text = await readTerminalAsync(session.tty);
-        return text === null ? send(res, 404, { error:'That Terminal tab is no longer open.' }) : send(res, 200, { tty:session.tty, text });
+        return text === null ? send(res, 404, { error:'That Terminal tab is no longer open.' }) : sendVersioned(req, res, { tty:session.tty, text });
       }
       if (req.method === 'POST') {
         const input = await body(req);
@@ -817,7 +829,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname.startsWith('/api/sessions/') && req.method === 'GET') {
       const id = decodeURIComponent(pathname.slice('/api/sessions/'.length));
       const session = sessions().find(s => s.id === id);
-      return session ? send(res, 200, { session: publicSession(session), messages: sessionMessages(session) }) : send(res, 404, { error: 'Session not found.' });
+      return session ? sendVersioned(req, res, { session: publicSession(session), messages: sessionMessages(session) }) : send(res, 404, { error: 'Session not found.' });
     }
     if (pathname === '/api/route' && req.method === 'POST') {
       const input = await body(req);
@@ -834,7 +846,7 @@ const server = http.createServer(async (req, res) => {
       const { route, model } = await planTask({ ...input, prompt:input.prompt.slice(0, 20000), harness:'auto', newSession:false });
       return send(res, 200, { route: { harness:route.session?.harness || route.harness, handoff:Boolean(route.handoff), reason:route.reason, fallbackReason:route.fallbackReason || '', confidence:route.score ?? null, source:route.source, model:model.model, modelSource:model.source, modelReason:model.reason } });
     }
-    if (pathname === '/api/tasks' && req.method === 'GET') { refreshQueuedTasks(); return send(res, 200, { tasks: tasks.slice(0, 100) }); }
+    if (pathname === '/api/tasks' && req.method === 'GET') { refreshQueuedTasks(); return sendVersioned(req, res, { tasks: tasks.slice(0, 60).map(taskSummary) }); }
     if (pathname === '/api/tasks' && req.method === 'POST') {
       let input = await body(req);
       if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 20000) return send(res, 400, { error: 'Prompt must be between 1 and 20,000 characters.' });
@@ -849,7 +861,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname.startsWith('/api/tasks/') && req.method === 'GET') {
       refreshQueuedTasks();
       const task = tasks.find(t => t.id === pathname.slice('/api/tasks/'.length));
-      return task ? send(res, 200, { task }) : send(res, 404, { error: 'Task not found.' });
+      return task ? sendVersioned(req, res, { task:publicTask(task) }) : send(res, 404, { error: 'Task not found.' });
     }
     if (pathname.endsWith('/cancel') && pathname.startsWith('/api/tasks/') && req.method === 'POST') {
       const id = pathname.split('/')[3];

@@ -2,6 +2,10 @@ import { renderMarkdown } from './markdown.js';
 const state = { sessions: [], tasks: [], available: {}, health: {}, view: 'inbox', filter: 'all', selectedSession: null, selectedTask: null, previewTimer: null };
 // Messages sent from Shed, shown in the conversation until the session's transcript records them.
 state.pending = [];
+state.v = {}; // last version of each polled resource
+state.sessionLimit = 60;
+// A 32-bit FNV-1a fingerprint: enough to tell "same HTML as last time" without storing the HTML a second time.
+function fingerprint(text) { let h = 0x811c9dc5; for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); } return `${h >>> 0}:${text.length}`; }
 const harnessNames = { codex:'Codex', claude:'Claude Code', gemini:'Gemini', pi:'Pi', opencode:'OpenCode' };
 const modelState = { configs:{}, draft:null };
 const $ = selector => document.querySelector(selector);
@@ -253,16 +257,29 @@ function render() {
   const live = state.sessions.filter(s => s.liveState !== 'history').sort((a,b) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   $('#active-count').textContent = live.length;
   const desk = live.length ? live.map(agentCard).join('') : `<div class="agent-empty">${agentSvg('pi', 'open')}<div><strong>No agents at their desks</strong><p>Start a session from the sidebar's + and it will show up here.</p></div></div>`;
-  if ($('#active-sessions').dataset.html !== desk) { $('#active-sessions').innerHTML = desk; $('#active-sessions').dataset.html = desk; } // rebuilding every refresh would restart the animations
+  const deskPrint = fingerprint(desk);
+  if ($('#active-sessions').dataset.print !== deskPrint) { $('#active-sessions').innerHTML = desk; $('#active-sessions').dataset.print = deskPrint; } // rebuilding every refresh would restart the animations
   $('#recent-sessions').innerHTML = state.sessions.filter(s => s.liveState === 'history').slice(0,6).map(sessionRow).join('') || '<div class="table-empty">No previous desktop sessions found yet.</div>';
+  // The Sessions and Activity lists are long; build them only while they are on screen.
+  if (state.view !== 'sessions') { if ($('#all-sessions').firstChild) $('#all-sessions').replaceChildren(); }
+  else renderSessionList();
+  if (state.view !== 'activity') { if ($('#activity-list').firstChild) $('#activity-list').replaceChildren(); }
+  else renderActivity();
+}
+document.addEventListener('click', e => { if (e.target.id === 'show-more-sessions') { state.sessionLimit += 60; renderSessionList(); } });
+$('#session-search').addEventListener('input', () => { state.sessionLimit = 60; });
+function renderSessionList() {
   const query = $('#session-search').value.trim().toLowerCase();
   const filtered = state.sessions.filter(s => (state.filter === 'all' || (state.filter === 'live' ? s.liveState !== 'history' : s.harness === state.filter)) && (!query || `${s.title} ${s.lastPrompt} ${s.cwd} ${s.harness}`.toLowerCase().includes(query)))
     .sort((a,b) => (a.liveState === 'history' ? 1 : 0) - (b.liveState === 'history' ? 1 : 0) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   $('#session-results').textContent = `${filtered.length} session${filtered.length === 1 ? '' : 's'}`;
-  $('#all-sessions').innerHTML = filtered.slice(0,300).map(sessionRow).join('') || '<div class="table-empty">No sessions match this search.</div>';
+ $('#all-sessions').innerHTML = (filtered.slice(0, state.sessionLimit).map(sessionRow).join('') || '<div class="table-empty">No sessions match this search.</div>') + (filtered.length > state.sessionLimit ? `<button class="pill show-more" id="show-more-sessions" type="button">Show ${Math.min(60, filtered.length - state.sessionLimit)} more of ${filtered.length - state.sessionLimit}</button>` : '');
+}
+function renderActivity() {
   $('#activity-list').innerHTML = state.tasks.length ? state.tasks.map(t => `<div class="activity-item" data-task="${escapeHtml(t.id)}">${symbol(t.harness)}<div class="activity-main"><strong>${escapeHtml(t.title)}</strong><small>${escapeHtml(projectName(t.cwd))} · ${escapeHtml(t.model || 'default model')} (${escapeHtml(t.modelSource || 'harness-default')}) · ${escapeHtml(t.routeSource || 'local')} route · ${relative(t.createdAt)}</small></div><span class="badge ${escapeHtml(t.status)}">${escapeHtml(t.status)}</span></div>`).join('') : '<div class="empty-panel"><span class="empty-symbol">◷</span><div><strong>No tasks yet</strong><p>Sessions you start through Shed will appear here.</p></div></div>';
 }
-async function refresh() { try { const [s,t] = await Promise.all([api('/api/sessions'), api('/api/tasks')]); state.sessions = s.sessions; state.tasks = t.tasks; renderProjects(); render(); if (state.selectedTask) openTask(state.selectedTask, true); if (state.selectedSession) openSession(state.selectedSession.id, true); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
+async function refresh() { if (document.hidden) return; try { const [s,t] = await Promise.all([api(`/api/sessions?v=${state.v.sessions || ''}`), api(`/api/tasks?v=${state.v.tasks || ''}`)]); let changed = false; if (!s.same) { state.sessions = s.sessions; state.v.sessions = s.v; changed = true; } if (!t.same) { state.tasks = t.tasks; state.v.tasks = t.v; changed = true; } if (changed) { renderProjects(); render(); } if (state.selectedTask) openTask(state.selectedTask, true); if (state.selectedSession) openSession(state.selectedSession.id, true); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
+document.addEventListener('visibilitychange', () => { if (!document.hidden && $('#auth-screen').classList.contains('hidden')) { refresh(); loadTerminal(); } });
 async function init() { try { const me = await api('/api/me'); Object.assign(state, me); hideAuth(); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); await Promise.all([refresh(), loadModels(), refreshHarnessHealth(), loadConnect()]); setupPush(); loadDevices(); openFromUrl(location.href); $('#phone-message').classList.toggle('hidden', state.view !== 'inbox'); const requestedView = new URL(location.href).searchParams.get('view'); if (['sessions','activity','settings'].includes(requestedView)) setView(requestedView); } catch (error) { if (error.message === 'Authentication required.') showAuth(); else showFeedback(error.message); } }
 async function previewRoute() { const prompt = $('#prompt').value.trim(); if (prompt.length < 9) { $('#route-preview').classList.add('hidden'); return; } try { const selectedProject = $('#project-select').value; const data = await api('/api/route', { method:'POST', body:JSON.stringify({prompt, harness:$('#harness-select').value, model:$('#model-select').value, cwd:selectedProject === '__new__' ? '' : selectedProject, newWorkspace:selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:true}) }); if ($('#prompt').value.trim() !== prompt) return; const route = data.route; $('#route-preview').innerHTML = `<span class="route-symbol">✦</span><span><b>Local preview:</b> New ${escapeHtml(route.harness)} session · ${escapeHtml(route.reason)} · ${escapeHtml(route.model || 'harness default')} model</span>`; $('#route-preview').classList.remove('hidden'); } catch { $('#route-preview').classList.add('hidden'); } }
 async function sendTask(prompt, options = {}) { if (!prompt.trim()) return; const button = options.sessionId ? $('#followup-send') : $('#send-button'); button.disabled = true; try { const selectedProject = $('#project-select').value; const isNew = !options.sessionId; const {task} = await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, harness:options.harness || $('#harness-select').value, model:options.model ?? (options.sessionId ? $('#followup-model').value : $('#model-select').value), cwd:options.cwd ?? (selectedProject === '__new__' ? '' : selectedProject), newWorkspace:isNew && selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:isNew, sessionId:options.sessionId || null, followup:options.followup || 'auto', skipPermissions:options.sessionId ? $('#followup-skip').checked : $('#skip-permissions').checked }) }); $('#prompt').value = ''; $('#followup-prompt').value = ''; $('#followup-prompt').style.height = ''; state.followupPreviewKey = null; $('#followup-preview').classList.add('hidden'); $('#new-workspace').value = ''; $('#route-preview').classList.add('hidden');
@@ -279,9 +296,10 @@ $('#drawer-content').addEventListener('scroll', () => {
 // The drawer refreshes every few seconds; only rebuild when something changed, and keep every scroll position when it does.
 function setDrawerContent(html, force = false) {
   const el = $('#drawer-content');
-  if (!force && el.dataset.html === html) return false;
+  const print = fingerprint(html);
+  if (!force && el.dataset.print === print) return false;
   const inner = [...el.querySelectorAll('.message-body')].map(b => ({ top:b.scrollTop, atBottom:b.scrollHeight - b.scrollTop - b.clientHeight < 24 }));
-  el.innerHTML = html; el.dataset.html = html;
+  el.innerHTML = html; el.dataset.print = print;
   if (!force) el.querySelectorAll('.message-body').forEach((b, i) => { const prior = inner[i]; if (prior) b.scrollTop = prior.atBottom && i === inner.length - 1 ? b.scrollHeight : prior.top; });
   return true;
 }
@@ -443,21 +461,24 @@ function tidyTerminal(text) {
   return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/[─━]{24,}/g, '─'.repeat(24));
 }
 async function loadTerminal(reset = false) {
+  if (document.hidden) return;
   const target = terminalTarget(), view = $('#terminal-view'), scroller = $('#terminal-scroll');
   if (!target || state.pane !== 'terminal' || $('#detail-drawer').classList.contains('hidden')) return;
-  if (reset) { view.textContent = 'Reading the terminal…'; view.dataset.text = ''; $('#terminal-controls').classList.remove('asking'); }
+  if (reset) { view.textContent = 'Reading the terminal…'; $('#terminal-controls').classList.remove('asking'); }
   if (!state.login) $('#terminal-caption').textContent = `Live · ${target.tty.replace("/dev/", "")} on the Mac · updates every 2s`;
   try {
-    const { text } = await api(target.url);
-    if (terminalTarget()?.key !== target.key || view.dataset.text === text) return;
+    const data = await api(`${target.url}?v=${reset ? '' : state.terminalV?.[target.key] || ''}`);
+    if (terminalTarget()?.key !== target.key || data.same) return;
+    state.terminalV = { [target.key]:data.v };
+    const { text } = data;
     const screen = text.split('\n').slice(-20).join('\n');
     $('#terminal-controls').classList.toggle('asking', /Esc to cancel|Enter to confirm|❯\s*1\.|Would you like to|Press enter to confirm|›\s*1\.\s/i.test(screen));
     const atBottom = reset || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
     // A wide desktop drawer shows the terminal exactly as laid out; a phone gets the reflowed version.
     view.textContent = wideTerminal.matches ? text.split('\n').map(line => line.replace(/\s+$/, '')).join('\n').replace(/\n{3,}/g, '\n\n') : tidyTerminal(text);
-    view.dataset.text = text;
+
     if (atBottom) scroller.scrollTop = scroller.scrollHeight;
-  } catch (error) { view.textContent = error.message; view.dataset.text = ''; }
+  } catch (error) { view.textContent = error.message; }
 }
 function openDrawer() { $('#detail-drawer').classList.remove('hidden'); $('#drawer-backdrop').classList.remove('hidden'); }
 function closeDrawer() { $('#detail-drawer').classList.remove('wide'); state.selectedSession = null; state.selectedTask = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#detail-drawer').classList.add('hidden'); $('#drawer-backdrop').classList.add('hidden'); }
@@ -481,8 +502,15 @@ function topicLine(text, max = 160) {
 }
 async function openSession(id, silent = false) {
   try {
-    const { session, messages } = await api(`/api/sessions/${encodeURIComponent(id)}`);
+    const known = state.sessionV?.id === id ? state.sessionV.v : '';
+    let data = await api(`/api/sessions/${encodeURIComponent(id)}?v=${silent ? known : ''}`);
     if (silent && state.selectedSession?.id !== id) return;
+    if (data.same) {
+      // The conversation has not changed; redraw only if a sent message's delivery status may have.
+      if (!state.pending.some(p => p.sessionId === id)) return;
+      data = state.sessionV.data;
+    } else state.sessionV = { id, v:data.v, data };
+    const { session, messages } = data;
     const content = $('#drawer-content');
     const priorScroll = content.scrollTop;
     const stickToBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 80;
@@ -518,7 +546,17 @@ async function openSession(id, silent = false) {
     }
   } catch (error) { if (!silent) showFeedback(error.message); }
 }
-function openTask(id, silent = false) { const task = state.tasks.find(t => t.id === id); if (!task) return; if (state.followTask === task.id && task.sessionId && state.sessions.some(s => s.id === task.sessionId)) { state.followTask = null; state.pinBottom = true; return openSession(task.sessionId); } if (!silent) { state.files = { key:'', list:[] }; if (task.cwd) fetchFiles(`/api/tasks/${encodeURIComponent(task.id)}`).then(() => openTask(task.id, true)); } state.selectedTask = id; state.selectedSession = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#drawer-harness').innerHTML = `${symbol(task.harness)} <span style="vertical-align:middle;margin-left:7px">TASK · ${escapeHtml(task.status.toUpperCase())}</span>`; const scroll = $('#drawer-content').scrollTop; const changed = setDrawerContent(`<h2 class="drawer-title">${escapeHtml(task.title)}</h2><div class="drawer-path">${escapeHtml(task.cwd)} · ${relative(task.createdAt)}</div><div class="message"><div class="message-label">ROUTING · ${escapeHtml((task.routeSource || 'local').toUpperCase())}</div><div class="message-body">${escapeHtml(task.routeReason)}${task.handoffFrom ? `\nHanded off from: ${escapeHtml(task.handoffFrom)}` : ''}${task.sessionId ? `\nSession: ${escapeHtml(task.sessionId)}` : ''}${task.waitingOn && task.status === 'running' ? `\nWaiting for your answer in its Terminal tab: ${escapeHtml(task.waitingOn)}` : ''}${task.tty ? `\nTerminal on the Mac: ${escapeHtml(task.tty.replace('/dev/', ''))}${task.permissions === 'skip' ? ' · permissions skipped' : task.permissions === 'default' ? ' · asks before using tools' : " · uses that terminal's own permissions"}` : ''}${task.routeFallbackReason ? `\n${escapeHtml(task.routeFallbackReason)}` : ''}</div></div><div class="message"><div class="message-label">MODEL · ${escapeHtml((task.modelSource || 'harness-default').toUpperCase())}</div><div class="message-body">${escapeHtml(task.model || (task.modelSource === 'session' ? 'Current session model' : 'Harness default'))} · ${escapeHtml(task.modelReason || '')}${task.modelFallbackReason ? `\n${escapeHtml(task.modelFallbackReason)}` : ''}</div></div><div class="message user"><div class="message-label">YOUR PROMPT</div><div class="message-body">${escapeHtml(task.prompt)}</div></div><div class="message"><div class="message-label">${escapeHtml(task.harness.toUpperCase())} · ${escapeHtml(task.status.toUpperCase())}</div><div class="message-body md">${task.output ? renderMarkdown(task.output) : escapeHtml(task.status === 'running' ? 'Working on it…' : 'No output yet.')}</div>${fileChips(task.output)}</div>${task.error ? `<div class="message"><div class="message-label">DETAILS</div><div class="message-body">${escapeHtml(task.error)}</div></div>` : ''}${task.delivery !== 'queue' && ['running','cancelling'].includes(task.status) ? `<button class="pill" id="cancel-task" ${task.status === 'cancelling' ? 'disabled' : ''}>Cancel task</button>` : ''}${task.sessionId ? `<button class="pill" id="open-task-session" style="margin-left:8px">Open session ↗</button>` : ''}`, !silent); if (!silent) $('#drawer-content').scrollTop = 0; else if (changed) $('#drawer-content').scrollTop = scroll; $('#drawer-tabs').classList.toggle('hidden', !task.tty); $('#drawer-tabs [data-pane=terminal]').classList.toggle('hidden', !task.tty); $('#drawer-tabs [data-pane=files]').classList.add('hidden'); if (!silent || !task.tty) showPane('conversation'); $('.drawer-composer').classList.add('hidden'); if (!silent) openDrawer(); }
+async function openTask(id, silent = false) {
+  const known = state.taskDetail?.id === id ? state.taskDetail : null;
+  try {
+    const data = await api(`/api/tasks/${encodeURIComponent(id)}?v=${known?.v || ''}`);
+    if (silent && state.selectedTask !== id) return;
+    if (data.same && silent) return; // nothing changed since it was drawn
+    state.taskDetail = data.same ? known : { id, v:data.v, task:data.task };
+  } catch (error) { if (!silent) showFeedback(error.message); return; }
+  renderTask(state.taskDetail.task, silent);
+}
+function renderTask(task, silent = false) { const id = task.id; if (state.followTask === task.id && task.sessionId && state.sessions.some(s => s.id === task.sessionId)) { state.followTask = null; state.pinBottom = true; return openSession(task.sessionId); } if (!silent) { state.files = { key:'', list:[] }; if (task.cwd) fetchFiles(`/api/tasks/${encodeURIComponent(task.id)}`).then(() => openTask(task.id, true)); } state.selectedTask = id; state.selectedSession = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#drawer-harness').innerHTML = `${symbol(task.harness)} <span style="vertical-align:middle;margin-left:7px">TASK · ${escapeHtml(task.status.toUpperCase())}</span>`; const scroll = $('#drawer-content').scrollTop; const changed = setDrawerContent(`<h2 class="drawer-title">${escapeHtml(task.title)}</h2><div class="drawer-path">${escapeHtml(task.cwd)} · ${relative(task.createdAt)}</div><div class="message"><div class="message-label">ROUTING · ${escapeHtml((task.routeSource || 'local').toUpperCase())}</div><div class="message-body">${escapeHtml(task.routeReason)}${task.handoffFrom ? `\nHanded off from: ${escapeHtml(task.handoffFrom)}` : ''}${task.sessionId ? `\nSession: ${escapeHtml(task.sessionId)}` : ''}${task.waitingOn && task.status === 'running' ? `\nWaiting for your answer in its Terminal tab: ${escapeHtml(task.waitingOn)}` : ''}${task.tty ? `\nTerminal on the Mac: ${escapeHtml(task.tty.replace('/dev/', ''))}${task.permissions === 'skip' ? ' · permissions skipped' : task.permissions === 'default' ? ' · asks before using tools' : " · uses that terminal's own permissions"}` : ''}${task.routeFallbackReason ? `\n${escapeHtml(task.routeFallbackReason)}` : ''}</div></div><div class="message"><div class="message-label">MODEL · ${escapeHtml((task.modelSource || 'harness-default').toUpperCase())}</div><div class="message-body">${escapeHtml(task.model || (task.modelSource === 'session' ? 'Current session model' : 'Harness default'))} · ${escapeHtml(task.modelReason || '')}${task.modelFallbackReason ? `\n${escapeHtml(task.modelFallbackReason)}` : ''}</div></div><div class="message user"><div class="message-label">YOUR PROMPT</div><div class="message-body">${escapeHtml(task.prompt)}</div></div><div class="message"><div class="message-label">${escapeHtml(task.harness.toUpperCase())} · ${escapeHtml(task.status.toUpperCase())}</div><div class="message-body md">${task.output ? renderMarkdown(task.output) : escapeHtml(task.status === 'running' ? 'Working on it…' : 'No output yet.')}</div>${fileChips(task.output)}</div>${task.error ? `<div class="message"><div class="message-label">DETAILS</div><div class="message-body">${escapeHtml(task.error)}</div></div>` : ''}${task.delivery !== 'queue' && ['running','cancelling'].includes(task.status) ? `<button class="pill" id="cancel-task" ${task.status === 'cancelling' ? 'disabled' : ''}>Cancel task</button>` : ''}${task.sessionId ? `<button class="pill" id="open-task-session" style="margin-left:8px">Open session ↗</button>` : ''}`, !silent); if (!silent) $('#drawer-content').scrollTop = 0; else if (changed) $('#drawer-content').scrollTop = scroll; $('#drawer-tabs').classList.toggle('hidden', !task.tty); $('#drawer-tabs [data-pane=terminal]').classList.toggle('hidden', !task.tty); $('#drawer-tabs [data-pane=files]').classList.add('hidden'); if (!silent || !task.tty) showPane('conversation'); $('.drawer-composer').classList.add('hidden'); if (!silent) openDrawer(); }
 $('#auth-form').addEventListener('submit', async e => { e.preventDefault(); try { const result = await api('/api/auth', { method:'POST', body:JSON.stringify({ password:$('#auth-password').value, pairCode }) }); $('#auth-error').textContent = ''; $('#auth-password').value = ''; if (result.status === 'pending') return showWaiting(result.device?.name); await init(); } catch (error) { $('#auth-error').textContent = error.message; } });
 $('#show-password-setup').addEventListener('click', () => { $('#password-setup').classList.toggle('hidden'); $('#setup-password').focus(); });
 $('#password-setup').addEventListener('submit', async e => { e.preventDefault(); const password = $('#setup-password').value; if (password !== $('#setup-password-confirm').value) { $('#auth-error').textContent = 'Passwords do not match.'; return; } try { await api('/api/password/setup', { method:'POST', body:JSON.stringify({ password }) }); $('#auth-error').textContent = 'Password saved. Unlocking…'; await api('/api/auth', { method:'POST', body:JSON.stringify({ password }) }); $('#password-setup').reset(); await init(); } catch (error) { $('#auth-error').textContent = error.message; } });
