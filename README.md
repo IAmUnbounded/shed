@@ -4,9 +4,9 @@
 
 **Website:** https://shed-sigma.vercel.app
 
-[![Shed: a one-minute tour](site/tour-poster.jpg)](https://shed-sigma.vercel.app/#tour)
+[![Shed: an 80-second tour](site/tour-poster.jpg)](https://shed-sigma.vercel.app/#tour)
 
-▶ [Watch the one-minute tour](https://shed-sigma.vercel.app/#tour) · [Download the video (MP4)](https://shed-sigma.vercel.app/shed-tour.mp4)
+▶ [Watch the 80-second tour](https://shed-sigma.vercel.app/#tour) · [Download the video (MP4)](https://shed-sigma.vercel.app/shed-tour.mp4)
 
 A local, internet-accessible task plane for desktop coding agents. It shows sessions that are currently open in Codex, Claude Code, Gemini, Pi, and OpenCode, refreshes their transcripts, and lets you continue them from a browser. You can also start a completely new coding session from a phone when no desktop session exists.
 

@@ -2,7 +2,7 @@ import React, {useEffect, useState} from 'react';
 import {AbsoluteFill, Img, Sequence, continueRender, delayRender, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 
 // "What is Shed": a 62-second tour in the same night palette, fonts and pixel sprites as the Shed app and site.
-export const TOUR_FRAMES = 1860;
+export const TOUR_FRAMES = 2400;
 
 const C = {
   night: '#131b17', raised: '#1a241f', line: '#2b3a32', cream: '#efe6d4', muted: '#a6b0a3',
@@ -165,9 +165,9 @@ const Phone: React.FC<{children: React.ReactNode; style?: React.CSSProperties; s
     {children}
   </div>
 );
-const MessageBar: React.FC<{text: string; pressed?: boolean; placeholder?: boolean}> = ({text, pressed, placeholder}) => (
+const MessageBar: React.FC<{text: string; pressed?: boolean; placeholder?: boolean; agent?: string; agentLit?: boolean}> = ({text, pressed, placeholder, agent = '✦ Auto', agentLit}) => (
   <div style={{display: 'flex', alignItems: 'center', gap: 10, background: '#fffdf8', border: '2px solid #ddd3c6', borderRadius: 34, padding: '9px 9px 9px 16px', fontFamily: F.body, fontSize: 21}}>
-    <span style={{border: '2px solid #e1d9cb', borderRadius: 20, padding: '4px 12px', fontSize: 18, color: C.ink, background: '#f1efe9'}}>✦ Auto</span>
+    <span style={{border: `2px solid ${agentLit ? '#a6573d' : '#e1d9cb'}`, borderRadius: 20, padding: '4px 12px', fontSize: 18, color: C.ink, background: agentLit ? '#f5e7df' : '#f1efe9', whiteSpace: 'nowrap'}}>{agent}</span>
     <span style={{flex: 1, color: placeholder ? '#9a958b' : C.ink, whiteSpace: 'nowrap', overflow: 'hidden'}}>{text}</span>
     <span style={{width: 48, height: 48, borderRadius: '50%', background: '#a6573d', color: '#fff', display: 'grid', placeItems: 'center', fontSize: 24, transform: `scale(${pressed ? 0.86 : 1})`}}>↑</span>
   </div>
@@ -201,8 +201,8 @@ const LINES: Record<string, string[]> = {
 };
 const Desk: React.FC = () => {
   const f = useCurrentFrame();
-  const away = ease(f, 150, 210);
-  const firstLine = 1 - ease(f, 140, 160), secondLine = ease(f, 166, 188);
+  const away = ease(f, 110, 160);
+  const firstLine = 1 - ease(f, 100, 118), secondLine = ease(f, 124, 144);
   return (
     <AbsoluteFill style={{background: C.night}}>
       <Stars frame={f} />
@@ -225,6 +225,234 @@ const Desk: React.FC = () => {
             </TerminalWindow>
           </Rise>
         ))}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+
+// ---------- new: starting agents from the phone ----------
+const DeskCard: React.FC<{agent: string; mood: Mood; project: string; harness: string; frame: number; seed?: number; pop?: number}> = ({agent, mood, project, harness, frame, seed, pop = 1}) => {
+  const status = {working: ['Typing away', '#4e7a62'], open: ['Waiting for you', '#8a8579'], asking: ['Needs your OK', '#b25b3d']}[mood];
+  return (
+    <div style={{transform: `scale(${pop})`, opacity: Math.min(1, pop * 1.4), transformOrigin: '50% 60%', background: '#fffdf8', border: '2px solid #e3dccf', borderRadius: 18, overflow: 'hidden'}}>
+      <div style={{position: 'relative', height: 108, display: 'grid', placeItems: 'center', background: 'linear-gradient(#fbf9f4, #f1ece2)', borderBottom: '2px dashed #e3dccf'}}>
+        <span style={{position: 'absolute', top: 7, left: 10, fontFamily: F.mono, fontSize: 12.5, color: '#8a8579'}}>{harness}</span>
+        <div style={{marginTop: 12}}><Agent name={agent} mood={mood} size={118} frame={frame} seed={seed} /></div>
+      </div>
+      <div style={{padding: '9px 12px 12px'}}>
+        <div style={{fontFamily: F.body, fontWeight: 500, fontSize: 18, color: C.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>{project}</div>
+        <div style={{fontFamily: F.mono, fontSize: 14, color: status[1], marginTop: 2}}>● {status[0]}</div>
+      </div>
+    </div>
+  );
+};
+const MiniTerminal: React.FC<{title: string; lines: string[]; frame: number; at: number}> = ({title, lines, frame, at}) => {
+  const {fps} = useVideoConfig();
+  const s = spring({frame: frame - at, fps, config: {damping: 16}});
+  if (frame < at) return null;
+  return (
+    <div style={{transform: `translateY(${(1 - s) * 40}px) scale(${0.9 + s * 0.1})`, opacity: s, background: C.term, border: `2px solid ${C.line}`, borderRadius: 12, overflow: 'hidden', boxShadow: '0 20px 50px #0008'}}>
+      <div style={{display: 'flex', gap: 7, alignItems: 'center', padding: '8px 12px', borderBottom: `2px solid ${C.line}`, fontFamily: F.mono, fontSize: 14, color: C.muted}}>
+        <i style={{width: 10, height: 10, borderRadius: '50%', background: '#3a4740'}} /><i style={{width: 10, height: 10, borderRadius: '50%', background: '#3a4740'}} /><i style={{width: 10, height: 10, borderRadius: '50%', background: '#3a4740'}} /><span style={{marginLeft: 6}}>{title}</span>
+      </div>
+      <div style={{padding: '10px 14px', fontFamily: F.mono, fontSize: 17, lineHeight: 1.5, color: '#d9e4dc', whiteSpace: 'pre-wrap', minHeight: 96}}>
+        {lines.map((line, i) => <div key={i} style={{color: i === 0 ? C.cream : C.mint}}>{typed(line, frame, at + 12 + i * 22, 2)}</div>)}
+      </div>
+    </div>
+  );
+};
+const ADD_OPTIONS = [['Claude Code · Sonnet', 0.78, true], ['Codex · gpt-6-sol', 0.15, false], ['Gemini · 2.5 Pro', 0.07, false]] as const;
+const AddAgents: React.FC = () => {
+  const f = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const first = 'Build a landing page for my bakery';
+  const second = 'Add pagination to the orders API';
+  const firstSent = f >= 104, secondSent = f >= 318;
+  const pop1 = firstSent && f >= 205 ? spring({frame: f - 205, fps, config: {damping: 11}}) : 0;
+  const pop2 = secondSent && f >= 340 ? spring({frame: f - 340, fps, config: {damping: 11}}) : 0;
+  const barText = f < 104 ? typed(first, f, 22, 0.5) : f >= 236 && f < 318 ? typed(second, f, 252, 0.6) : '';
+  const picker = f >= 236 && f < 330 ? 'Codex' : '✦ Auto';
+  const count = 2 + (pop1 > 0.2 ? 1 : 0) + (pop2 > 0.2 ? 1 : 0);
+  const line = f < 196 ? 0 : f < 236 ? 1 : f < 330 ? 2 : 3;
+  const headlines = ['Start an agent from your phone.', 'It joins your desk on the Mac.', 'Or pick the agent yourself.', 'Each one runs in its own Terminal.'];
+  const cards: React.ReactNode[] = [];
+  if (pop2 > 0) cards.push(<DeskCard key="orders" agent="codex" mood="working" project="orders-api" harness="Codex" frame={f} seed={4} pop={pop2} />);
+  if (pop1 > 0) cards.push(<DeskCard key="bakery" agent="claude" mood="working" project="bakery-site" harness="Claude Code" frame={f} seed={3} pop={pop1} />);
+  cards.push(<DeskCard key="web" agent="claude" mood="open" project="web-app" harness="Claude Code" frame={f} seed={1} />);
+  cards.push(<DeskCard key="shop" agent="codex" mood="working" project="shop-backend" harness="Codex" frame={f} seed={2} />);
+  return (
+    <AbsoluteFill style={{background: C.night}}>
+      <Stars frame={f} />
+      <div style={{position: 'absolute', left: 200, top: 90, transform: `translateY(${ease(f, 0, 22, 50, 0)}px)`, opacity: ease(f, 0, 16)}}>
+        <Phone>
+          <div style={{display: 'flex', alignItems: 'center', gap: 10, margin: '2px 6px 12px'}}>
+            <span style={{fontFamily: F.display, fontWeight: 800, fontSize: 36, color: C.ink, letterSpacing: '-0.02em'}}>Live sessions</span>
+            <span style={{fontFamily: F.mono, fontSize: 18, color: '#466e58', background: '#e5efe9', borderRadius: 8, padding: '2px 9px'}}>{count}</span>
+          </div>
+          <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12}}>{cards.slice(0, 4)}</div>
+          <div style={{marginTop: 20, fontFamily: F.display, fontWeight: 700, fontSize: 24, color: C.ink, padding: '0 6px'}}>Pick up where you left off</div>
+          <div style={{marginTop: 8, display: 'grid', gap: 8}}>
+            {[['✳', 'Why is the build slow?', 'web-app'], ['◇', 'Ship the onboarding emails', 'growth']].slice(0, count >= 4 ? 1 : 2).map(([icon, title, project]) => (
+              <div key={title} style={{display: 'flex', alignItems: 'center', gap: 12, background: '#fffdf8', border: '2px solid #e3dccf', borderRadius: 14, padding: '10px 14px'}}>
+                <span style={{width: 34, height: 34, borderRadius: 9, background: '#f5e7df', color: '#c2603f', display: 'grid', placeItems: 'center'}}>{icon}</span>
+                <div><div style={{fontFamily: F.body, fontWeight: 500, fontSize: 17, color: C.ink}}>{title}</div><div style={{fontFamily: F.mono, fontSize: 13, color: '#8a8579'}}>{project}</div></div>
+              </div>
+            ))}
+          </div>
+          <div style={{position: 'absolute', left: 22, right: 22, bottom: 30}}>
+            <MessageBar text={barText || 'Message Shed…'} placeholder={!barText} pressed={(f >= 96 && f < 106) || (f >= 310 && f < 320)} agent={picker} agentLit={picker !== '✦ Auto'} />
+          </div>
+          {f >= 236 && f < 252 && <div style={{position: 'absolute', left: 30, bottom: 96, background: '#fffdf8', border: '2px solid #ddd3c6', borderRadius: 14, boxShadow: '0 12px 30px #0002', fontFamily: F.body, fontSize: 19, color: C.ink, overflow: 'hidden'}}>
+            {['✦ Auto', 'Claude Code', 'Codex', 'Gemini'].map(o => <div key={o} style={{padding: '9px 18px', background: o === 'Codex' ? '#f5e7df' : 'transparent'}}>{o}</div>)}
+          </div>}
+        </Phone>
+      </div>
+      <div style={{position: 'absolute', left: 840, top: 110, width: 960, display: 'grid', gap: 22}}>
+        <Eyebrow>Add agents</Eyebrow>
+        <div style={{position: 'relative', height: 160}}>
+          {headlines.map((h, i) => <div key={h} style={{position: 'absolute', inset: 0, opacity: i === line ? 1 : 0, transform: `translateY(${i === line ? 0 : 14}px)`}}><Headline size={66}>{h}</Headline></div>)}
+        </div>
+        <div style={{fontFamily: F.body, fontSize: 28, color: C.muted, lineHeight: 1.45, maxWidth: 860, minHeight: 84}}>
+          {line < 2 ? 'Leave it on Auto and Laya, running on your Mac, picks the harness and the model.' : 'Tap the picker to choose Claude Code, Codex, Gemini, OpenCode or Pi.'}
+        </div>
+        {firstSent && f < 236 && (
+          <Rise frame={f} at={110}>
+            <div style={{border: `2px solid ${C.line}`, borderRadius: 18, background: C.raised, padding: '20px 26px', display: 'grid', gap: 14}}>
+              <div style={{display: 'flex', justifyContent: 'space-between', fontFamily: F.mono, fontSize: 21, color: C.mint}}><span>✦ Laya · choosing for “{first}”</span></div>
+              {ADD_OPTIONS.map(([label, score, pick], i) => {
+                const w = ease(f, 122 + i * 6, 180 + i * 6, 0, score);
+                return (
+                  <div key={label} style={{display: 'grid', gridTemplateColumns: '320px 1fr 70px', alignItems: 'center', gap: 16, fontFamily: F.mono, fontSize: 21, color: pick && f > 190 ? C.cream : C.muted}}>
+                    <span>{pick && f > 190 ? '✓ ' : '  '}{label}</span>
+                    <div style={{height: 12, background: '#24302a', borderRadius: 6}}><div style={{height: 12, width: `${w * 100}%`, background: pick ? C.mint : '#4b5c52', borderRadius: 6}} /></div>
+                    <span style={{textAlign: 'right'}}>{Math.round(w * 100)}%</span>
+                  </div>
+                );
+              })}
+            </div>
+          </Rise>
+        )}
+        {f >= 236 && (
+          <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20}}>
+            <MiniTerminal title="ttys012 · bakery-site · claude" lines={['❯ Build a landing page for my bakery', '⏺ Creating index.html…']} frame={f} at={240} />
+            <MiniTerminal title="ttys013 · orders-api · codex" lines={['› Add pagination to the orders API', '• Reading routes/orders.ts']} frame={f} at={345} />
+          </div>
+        )}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+// ---------- new: chatting with an agent ----------
+const ChatBubble: React.FC<{who: 'you' | 'claude'; children: React.ReactNode; label?: string; status?: string; fade?: number}> = ({who, children, label, status, fade = 1}) => (
+  <div style={{opacity: fade, marginBottom: 14}}>
+    <div style={{fontFamily: F.mono, fontSize: 14, letterSpacing: '.06em', color: who === 'you' ? '#a6573d' : '#8a8579', marginBottom: 6}}>{label || (who === 'you' ? 'YOU' : 'CLAUDE')}</div>
+    <div style={{fontFamily: F.body, fontSize: 18.5, lineHeight: 1.5, color: C.ink, background: who === 'you' ? '#f5e7df' : '#fffdf8', border: `2px solid ${who === 'you' ? '#ecd5c8' : '#e3dccf'}`, borderRadius: 14, padding: '11px 14px'}}>{children}</div>
+    {status && <div style={{textAlign: 'right', fontFamily: F.mono, fontSize: 14, color: '#4e7a62', marginTop: 5}}>{status}</div>}
+  </div>
+);
+const FileChip: React.FC<{icon: string; name: string; size: string; pop?: number}> = ({icon, name, size, pop = 1}) => (
+  <div style={{display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 8, padding: '6px 12px', border: '2px solid #e3d3c6', borderRadius: 999, background: '#fffdf8', fontFamily: F.body, fontSize: 16, color: C.ink, transform: `scale(${pop})`, transformOrigin: 'left center'}}>
+    <span style={{color: '#a6573d'}}>{icon}</span>{name}<span style={{fontFamily: F.mono, fontSize: 13, color: '#8a8579'}}>{size}</span>
+  </div>
+);
+const Chat: React.FC = () => {
+  const f = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const followUp = 'Make the header sticky and add our opening hours';
+  const sent = f >= 120;
+  const tab = f < 380 ? 'Conversation' : f < 490 ? 'Terminal' : 'Files';
+  const working = sent && f < 330;
+  const reply = 'Updated index.html:\n• A sticky header with your logo\n• Opening hours: Tue–Sun, 7am–3pm\n• Checked it at phone width';
+  const replyText = typed(reply, f, 200, 1.4);
+  const chipPop = f >= 318 ? spring({frame: f - 318, fps, config: {damping: 12}}) : 0;
+  const line = f < 120 ? 0 : f < 200 ? 1 : f < 380 ? 2 : f < 490 ? 3 : 4;
+  const headlines = ['Chat with any agent.', 'Your message goes into its real terminal.', 'Replies arrive formatted, files attached.', 'Watch the terminal live.', 'Download what it made.'];
+  const subs = [
+    'Open an agent from your desk and type, just like a chat app.',
+    'Shed types it into the Terminal tab where the session already runs. Same session, same model.',
+    'Bold, lists and code show up properly, and any file it mentions gets a download button. Status flips back to Waiting for you.',
+    'Stop, switch mode or answer its questions with one tap.',
+    'Videos, images and PDFs from the project, with a preview and a Download button.',
+  ];
+  const tabBtn = (name: string) => <span style={{flex: 1, textAlign: 'center', padding: '8px 0', borderRadius: 10, fontFamily: F.body, fontWeight: 500, fontSize: 17, background: tab === name ? '#fffdf8' : 'transparent', color: tab === name ? C.ink : '#7a766d', boxShadow: tab === name ? '0 1px 3px #0001' : 'none'}}>{name}</span>;
+  const renderLines = (text: string) => text.split('\n').map((l, i) => {
+    const parts = l.split('index.html');
+    const content = parts.length > 1 ? <>{parts[0]}<b>index.html</b>{parts[1]}</> : l;
+    return l.startsWith('•') ? <div key={i} style={{paddingLeft: 18, textIndent: -14}}>{content}</div> : <div key={i}>{content}</div>;
+  });
+  return (
+    <AbsoluteFill style={{background: C.night}}>
+      <Stars frame={f} />
+      <div style={{position: 'absolute', left: 200, top: 90, opacity: ease(f, 0, 14)}}>
+        <Phone>
+          <div style={{display: 'flex', alignItems: 'center', gap: 10, margin: '0 4px 10px'}}>
+            <span style={{width: 34, height: 34, borderRadius: 9, background: '#f5e7df', display: 'grid', placeItems: 'center', color: '#c2603f', fontSize: 18}}>✳</span>
+            <span style={{fontFamily: F.body, fontSize: 17, color: '#625f57', letterSpacing: '.03em'}}>CLAUDE · {working ? 'WORKING NOW' : 'WAITING FOR YOU'}</span>
+          </div>
+          <div style={{display: 'flex', gap: 4, padding: 4, background: '#efeae1', border: '2px solid #e3dccf', borderRadius: 12, marginBottom: 12}}>{tabBtn('Conversation')}{tabBtn('Terminal')}{tabBtn('Files')}</div>
+          {tab === 'Conversation' && (
+            <div style={{height: 560, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', padding: '0 4px'}}>
+              <div style={{fontFamily: F.display, fontWeight: 600, fontSize: 24, color: C.ink, marginBottom: 2}}>bakery-site</div>
+              <div style={{fontFamily: F.body, fontSize: 15.5, color: '#7a766d', marginBottom: 12}}>Build a landing page for my bakery</div>
+              <ChatBubble who="claude">Done. I built <b>index.html</b> with a hero for today’s specials, an order form and a map to the shop.<br /><FileChip icon="▣" name="landing.png" size="240 KB" /></ChatBubble>
+              {sent && <ChatBubble who="you" label="YOU · just now" status={f < 160 ? 'Sending to the terminal…' : f < 200 ? 'Delivered' : undefined}>{followUp}</ChatBubble>}
+              {f >= 200 && <ChatBubble who="claude">{renderLines(replyText)}{chipPop > 0 && <FileChip icon="▶" name="preview.mp4" size="1.2 MB" pop={chipPop} />}</ChatBubble>}
+            </div>
+          )}
+          {tab === 'Terminal' && (
+            <div style={{height: 560, background: C.term, borderRadius: 14, padding: '14px 16px', fontFamily: F.mono, fontSize: 15.5, lineHeight: 1.55, color: '#d9e4dc', whiteSpace: 'pre-wrap', display: 'flex', flexDirection: 'column'}}>
+              <div style={{color: '#7d8b82', fontSize: 13}}>Live · ttys012 on the Mac</div>
+              <div style={{flex: 1, marginTop: 10}}>
+                <div style={{color: C.cream}}>❯ {followUp}</div>
+                <div style={{marginTop: 8}}><span style={{color: C.mint}}>⏺</span> Updated index.html:</div>
+                <div>  • Sticky header with your logo</div>
+                <div>  • Opening hours: Tue–Sun, 7am–3pm</div>
+                <div style={{color: '#7d8b82', marginTop: 8}}>✻ Baked for 41s</div>
+                <div style={{marginTop: 10}}>❯ <Caret frame={f} /></div>
+              </div>
+              <div style={{display: 'flex', gap: 7}}>{['Stop', 'Mode', '1', '2', '3', 'Enter'].map(k => <span key={k} style={{flex: k.length > 1 ? 1.4 : 1, textAlign: 'center', padding: '9px 0', borderRadius: 10, background: '#2a2925', border: '2px solid #55514a', color: '#f3f1ea', fontSize: 15}}>{k}</span>)}</div>
+            </div>
+          )}
+          {tab === 'Files' && (
+            <div style={{height: 560, padding: '0 4px'}}>
+              <div style={{fontFamily: F.body, fontSize: 16, color: '#7a766d', margin: '4px 0 10px'}}>Newest files in <b style={{color: C.ink}}>bakery-site</b></div>
+              {[['▶', 'preview.mp4', 'out · 1.2 MB · now', '#f5e7df', '#a6573d'], ['▣', 'landing.png', 'out · 240 KB · 2m ago', '#e5efe9', '#466e58']].map(([icon, name, meta, bg, fg]) => (
+                <div key={name} style={{display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderBottom: '2px solid #ebe5da'}}>
+                  <span style={{width: 44, height: 44, borderRadius: 10, background: bg, color: fg, display: 'grid', placeItems: 'center', fontSize: 18}}>{icon}</span>
+                  <div style={{flex: 1}}><div style={{fontFamily: F.body, fontWeight: 600, fontSize: 18, color: C.ink}}>{name}</div><div style={{fontFamily: F.mono, fontSize: 13, color: '#8a8579'}}>{meta}</div></div>
+                  <span style={{fontFamily: F.body, fontWeight: 600, fontSize: 15, color: '#a6573d', border: '2px solid #e3d3c6', borderRadius: 9, padding: '7px 12px', transform: `scale(${f >= 560 && f < 572 && name === 'preview.mp4' ? 0.9 : 1})`}}>Download</span>
+                </div>
+              ))}
+              <div style={{marginTop: 14, height: 250, borderRadius: 14, overflow: 'hidden', background: '#2b2620', position: 'relative'}}>
+                <div style={{position: 'absolute', inset: 0, background: 'linear-gradient(135deg, #f4d7b5, #e9b98c)'}} />
+                <div style={{position: 'absolute', left: 0, right: 0, top: 0, height: 44, background: '#5b3a24', display: 'flex', alignItems: 'center', padding: '0 14px', fontFamily: F.display, fontWeight: 800, color: '#fff3e2', fontSize: 20}}>Rise Bakery<span style={{marginLeft: 'auto', fontFamily: F.body, fontWeight: 500, fontSize: 13}}>Tue–Sun 7–3</span></div>
+                <div style={{position: 'absolute', left: 16, top: 70, fontFamily: F.display, fontWeight: 800, fontSize: 34, color: '#4a2e1c', lineHeight: 1.05}}>Fresh sourdough<br />every morning</div>
+                <div style={{position: 'absolute', left: 16, bottom: 18, background: '#a6573d', color: '#fff', fontFamily: F.body, fontWeight: 600, fontSize: 15, borderRadius: 9, padding: '8px 14px'}}>Order for pickup</div>
+                <div style={{position: 'absolute', right: 12, bottom: 12, width: 44, height: 44, borderRadius: '50%', background: '#0008', color: '#fff', display: 'grid', placeItems: 'center', fontSize: 18}}>▶</div>
+              </div>
+            </div>
+          )}
+          <div style={{position: 'absolute', left: 22, right: 22, bottom: 28, display: tab === 'Conversation' ? 'flex' : 'none', gap: 10, alignItems: 'flex-end'}}>
+            <div style={{flex: 1, minHeight: 56, background: '#fffdf8', border: `2px solid ${f >= 30 && f < 120 ? '#a6573d' : '#ddd3c6'}`, borderRadius: 14, padding: '12px 14px', fontFamily: F.body, fontSize: 18, color: f >= 30 && f < 120 ? C.ink : '#9a958b'}}>{f >= 30 && f < 120 ? typed(followUp, f, 34, 0.62) : 'Message Claude Code…'}</div>
+            <span style={{height: 56, padding: '0 18px', borderRadius: 14, background: '#a6573d', color: '#fff', display: 'grid', placeItems: 'center', fontFamily: F.body, fontWeight: 600, fontSize: 18, transform: `scale(${f >= 112 && f < 122 ? 0.88 : 1})`}}>Send</span>
+          </div>
+        </Phone>
+      </div>
+      <div style={{position: 'absolute', left: 840, top: 200, width: 940, display: 'grid', gap: 24}}>
+        <Eyebrow>Chat</Eyebrow>
+        <div style={{position: 'relative', height: 170}}>
+          {headlines.map((h, i) => <div key={h} style={{position: 'absolute', inset: 0, opacity: i === line ? 1 : 0, transform: `translateY(${i === line ? 0 : 14}px)`}}><Headline size={70}>{h}</Headline></div>)}
+        </div>
+        <div style={{position: 'relative', height: 140}}>
+          {subs.map((t, i) => <div key={t} style={{position: 'absolute', inset: 0, opacity: i === line ? 1 : 0, fontFamily: F.body, fontSize: 30, lineHeight: 1.45, color: C.muted}}>{t}</div>)}
+        </div>
+        <div style={{display: 'flex', gap: 14, marginTop: 10}}>
+          {[['Waiting for you', !working, '#a6b0a3'], ['Typing away', working, C.mint]].map(([label, on, color]) => (
+            <span key={label as string} style={{fontFamily: F.mono, fontSize: 22, padding: '8px 16px', borderRadius: 999, border: `2px solid ${on ? color : C.line}`, color: on ? (color as string) : '#55635a'}}>● {label}</span>
+          ))}
+        </div>
       </div>
     </AbsoluteFill>
   );
@@ -311,6 +539,12 @@ const Handoff: React.FC = () => {
         </Phone>
       </div>
       {!arrived && <div style={{position: 'absolute', left: px, top: py, width: 22, height: 22, background: C.mint, boxShadow: `0 0 30px ${C.mint}`}} />}
+      {f >= 168 && f < 236 && (
+        <div style={{position: 'absolute', left: 150, top: 300 + ease(f, 168, 182, -60, 0), width: 340, opacity: Math.min(ease(f, 168, 178), ease(f, 226, 236, 1, 0)), background: '#fbfaf7ee', borderRadius: 22, padding: '14px 16px', boxShadow: '0 18px 40px #0006', display: 'flex', gap: 12, alignItems: 'center', zIndex: 5}}>
+          <div style={{flex: 'none'}}><ShedLogo size={46} frame={f} /></div>
+          <div style={{fontFamily: F.body, color: C.ink}}><div style={{fontWeight: 600, fontSize: 18}}>Claude needs your OK</div><div style={{fontSize: 15, color: '#625f57'}}>web-app: Do you want to edit login.test.js?</div></div>
+        </div>
+      )}
       <svg width={1920} height={1080} style={{position: 'absolute', inset: 0, opacity: arrived ? 0.25 : 0.6}}><path d="M560 650 C 760 650, 800 380, 960 380" stroke={C.mint} strokeWidth={4} strokeDasharray="6 14" fill="none" /></svg>
       <div style={{position: 'absolute', left: 960, top: 300, width: 840}}>
         <TerminalWindow title="ttys003 · ~/web-app · Claude Code" fontSize={25}>
@@ -335,7 +569,7 @@ const Handoff: React.FC = () => {
 const FEATURES = [
   {title: 'The same terminal, not a copy', body: 'Messages are typed into the Terminal tab that holds the session. Walk back to your Mac and it’s all there.', art: 'terminal'},
   {title: 'Routed on your Mac by Laya', body: 'An open-source decision model picks the harness and model. No API key, no tokens.', art: 'laya'},
-  {title: 'Replies survive restarts', body: 'Claude and Codex run in Terminal windows, and Shed follows their transcripts.', art: 'restart'},
+  {title: 'Live status and notifications', body: 'See who is typing, who is waiting and who needs your OK, and get a ping the moment it changes.', art: 'restart'},
   {title: 'Bring every agent you use', body: 'Claude Code, Codex, Gemini, OpenCode and Pi, in one place.', art: 'agents'},
 ] as const;
 const Highlights: React.FC = () => {
@@ -422,12 +656,13 @@ const Connect: React.FC = () => {
 
 // Scene timeline (frames at 30fps)
 const SCENES: [React.FC, number, number][] = [
-  [Intro, 0, 150],
-  [Desk, 150, 270],
-  [PhoneScene, 420, 330],
-  [Handoff, 750, 400],
-  [Highlights, 1150, 360],
-  [Connect, 1510, 350],
+  [Intro, 0, 140],
+  [Desk, 140, 200],
+  [AddAgents, 340, 470],
+  [Chat, 810, 620],
+  [Handoff, 1430, 370],
+  [Highlights, 1800, 300],
+  [Connect, 2100, 300],
 ];
 const Fade: React.FC<{duration: number; children: React.ReactNode}> = ({duration, children}) => {
   const f = useCurrentFrame();
