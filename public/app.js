@@ -9,7 +9,23 @@ const $$ = selector => [...document.querySelectorAll(selector)];
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const relative = date => { const diff = Math.max(0, Date.now() - Date.parse(date)); const m = Math.floor(diff / 60000); return m < 1 ? 'now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : m < 10080 ? `${Math.floor(m / 1440)}d ago` : new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
 const projectName = cwd => cwd ? cwd.split('/').filter(Boolean).pop() : 'Unknown project';
-async function api(url, options = {}) { const res = await fetch(url, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...options }); const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Request failed'); return data; }
+// While the Mac is restarting Shed or is unreachable, requests fail fast and a small banner says so, instead of the
+// page silently hanging. The banner clears on the next request that gets through.
+function setOffline(offline) { document.getElementById('reconnecting')?.classList.toggle('hidden', !offline); }
+async function api(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  let res;
+  try { res = await fetch(url, { credentials:'same-origin', headers:{ 'Content-Type':'application/json' }, signal:controller.signal, ...options }); }
+  catch (error) { setOffline(true); throw new Error(error.name === 'AbortError' ? 'Your Mac is taking too long to answer. Try again in a moment.' : 'Cannot reach your Mac right now. Shed may be restarting.'); }
+  finally { clearTimeout(timer); }
+  let data;
+  try { data = await res.json(); }
+  catch { setOffline(res.status >= 500); throw new Error(res.status >= 500 ? 'Cannot reach your Mac right now. Shed may be restarting.' : 'Unexpected response from your Mac.'); }
+  setOffline(false);
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
 function symbol(harness) { return `<span class="harness-symbol ${escapeHtml(harness)}">${({codex:'◇',claude:'✳',gemini:'✦',pi:'π',opencode:'◎'})[harness] || '?'}</span>`; }
 function showFeedback(message) { const el = $('#feedback'); el.textContent = message; el.classList.remove('hidden'); setTimeout(() => el.classList.add('hidden'), 6000); }
 const pairCode = (() => { const match = location.hash.match(/^#pair=([\w-]{10,})$/); if (match) history.replaceState(null, '', location.pathname + location.search); return match?.[1] || ''; })();

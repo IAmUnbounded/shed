@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 // Claude Code writes ~/.claude/sessions/<pid>.json for each running interactive session, with its session ID and busy/idle status.
 export function claudeLiveSessions() {
@@ -117,6 +117,69 @@ function shellQuote(value) { return `'${String(value).replace(/'/g, `'\\''`)}'`;
 export function openTerminal(cwd, argv, promptFile) {
   const command = `cd ${shellQuote(cwd)} && ${argv.map(shellQuote).join(' ')}${promptFile ? ` "$(cat ${shellQuote(promptFile)}; rm -f ${shellQuote(promptFile)})"` : ''}`;
   const tty = osascript(`on run argv
+  tell application "Terminal"
+    set t to do script (item 1 of argv)
+    return tty of t
+  end tell
+end run`, [command]);
+  if (!/^\/dev\/ttys\d+$/.test(tty)) throw new Error('Terminal did not open a new window.');
+  return tty;
+}
+
+// Non-blocking versions: AppleScript takes 0.1-0.3 seconds per call, and the synchronous calls above stop the whole
+// server (and every phone request) while they run. Anything on a request path or a timer uses these instead.
+function osascriptAsync(script, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('/usr/bin/osascript', ['-', ...args], { stdio:['pipe', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    const timer = setTimeout(() => child.kill(), 15000);
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { err += d; });
+    child.on('error', error => { clearTimeout(timer); reject(new Error(`Terminal could not be reached: ${error.message}`)); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) return resolve(out.replace(/\n$/, ''));
+      if (/-1743|not allowed|Not authorized/i.test(err)) return reject(new Error('macOS has not allowed the task plane to control Terminal. Approve it on the Mac under System Settings → Privacy & Security → Automation.'));
+      reject(new Error(err.trim() || 'Terminal did not respond.'));
+    });
+    child.stdin.end(script);
+  });
+}
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+export async function readTerminalAsync(tty, maxLines = 400) {
+  const text = await osascriptAsync(`${findTab}
+on run argv
+  set t to findTab(item 1 of argv)
+  if t is missing value then return "__TAB_MISSING__"
+  tell application "Terminal" to return history of t
+end run`, [tty]);
+  if (text === '__TAB_MISSING__') return null;
+  return text.replace(/\s+$/, '').split('\n').slice(-maxLines).join('\n');
+}
+
+export async function typeIntoTerminalAsync(tty, text, { prompt = false, agent = '' } = {}) {
+  if (agent && !agentInForeground(tty, agent)) throw new Error(`${agent} is no longer running in that Terminal tab.`);
+  const send = async value => {
+    const result = await osascriptAsync(`${findTab}
+on run argv
+  set t to findTab(item 1 of argv)
+  if t is missing value then return "missing"
+  tell application "Terminal" to do script (item 2 of argv) in t
+  return "ok"
+end run`, [tty, value]);
+    if (result !== 'ok') throw new Error('That Terminal tab is no longer open.');
+  };
+  if (!prompt) return send(text);
+  await send(`\u001b[200~${text}\u001b[201~`);
+  await pause(600);
+  if (agent && !agentInForeground(tty, agent)) { await send('\u0015'); throw new Error(`${agent} exited while the message was being typed.`); }
+  await send('');
+}
+
+export async function openTerminalAsync(cwd, argv, promptFile) {
+  const command = `cd ${shellQuote(cwd)} && ${argv.map(shellQuote).join(' ')}${promptFile ? ` "$(cat ${shellQuote(promptFile)}; rm -f ${shellQuote(promptFile)})"` : ''}`;
+  const tty = await osascriptAsync(`on run argv
   tell application "Terminal"
     set t to do script (item 1 of argv)
     return tty of t

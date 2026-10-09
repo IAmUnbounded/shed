@@ -565,3 +565,6 @@ img.brand-mark { background: none; image-rendering: pixelated; }
   .detail-drawer.wide .terminal-view { white-space: pre; word-break: normal; font-size: 12.5px; line-height: 1.5; }
   .detail-drawer.wide .terminal-scroll { overflow: auto; }
 }
+
+.reconnecting { position: fixed; top: calc(12px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 70; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; background: var(--ink); color: #fff; font: 500 13px var(--sans); box-shadow: 0 8px 24px #0003; }
+.reconnecting span { width: 8px; height: 8px; border-radius: 50%; background: #f0b25a; animation: waiting 1.2s ease-in-out infinite; }

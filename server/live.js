@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { claudeLiveSessions, ttyOf, readTerminal } from './terminal.js';
+import { claudeLiveSessions, ttyOf, readTerminalAsync } from './terminal.js';
 
 // Approval prompts and menus end with these lines; a session showing one is waiting on the user.
 const askingPatterns = {
@@ -10,19 +10,22 @@ const askingPatterns = {
 };
 // Mid-turn, both CLIs show "esc to interrupt" in their footer, even while waiting on their own tools or background work.
 const activePattern = /esc to interrupt|Working \(/i;
-// Reading a Terminal window takes about 0.3 seconds, so each reading is reused briefly.
+// Reading a Terminal window takes about 0.3 seconds. Readings are refreshed in the background (at most every
+// 8 seconds per window) and the last one is returned straight away, so session discovery never waits on Terminal.
 const screenCache = new Map();
 export function terminalState(tty, harness) {
   if (!tty || !askingPatterns[harness]) return { asking:false, active:false };
-  const key = `${tty}:${harness}`, hit = screenCache.get(key);
-  if (hit && Date.now() - hit.at < 8000) return hit.state;
-  let state = { asking:false, active:false };
-  try {
-    const screen = readTerminal(tty, 14) || '';
-    state = { asking:askingPatterns[harness].test(screen), active:activePattern.test(screen) };
-  } catch {}
-  screenCache.set(key, { at:Date.now(), state });
-  return state;
+  const key = `${tty}:${harness}`;
+  let entry = screenCache.get(key);
+  if (!entry) { entry = { at:0, state:{ asking:false, active:false }, pending:false }; screenCache.set(key, entry); }
+  if (!entry.pending && Date.now() - entry.at > 8000) {
+    entry.pending = true;
+    readTerminalAsync(tty, 14)
+      .then(screen => { entry.state = { asking:askingPatterns[harness].test(screen || ''), active:activePattern.test(screen || '') }; })
+      .catch(() => {})
+      .finally(() => { entry.at = Date.now(); entry.pending = false; });
+  }
+  return entry.state;
 }
 export const terminalIsAsking = (tty, harness) => terminalState(tty, harness).asking;
 // Claude's own status: busy (mid-turn), waiting (needs the person's input) or idle. Its footer covers the gaps,

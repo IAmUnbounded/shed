@@ -10,7 +10,8 @@ export function initPush(dataDir) {
   file = path.join(dataDir, 'push.json');
   try { state = { ...state, ...JSON.parse(fs.readFileSync(file, 'utf8')) }; } catch { /* first run */ }
   if (!state.keys) { state.keys = webpush.generateVAPIDKeys(); save(); }
-  webpush.setVapidDetails('mailto:shed@localhost', state.keys.publicKey, state.keys.privateKey);
+  // Apple's push service rejects a localhost contact (403 BadJwtToken); the subject must be a real https or mailto address.
+  webpush.setVapidDetails('https://github.com/IAmUnbounded/shed', state.keys.publicKey, state.keys.privateKey);
 }
 function save() { fs.writeFileSync(file, JSON.stringify(state, null, 2), { mode:0o600 }); }
 

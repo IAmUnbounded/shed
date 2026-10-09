@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript } from './sessions.js';
 import { codexWorkState, terminalIsAsking, terminalState } from './live.js';
-import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground } from './terminal.js';
+import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync } from './terminal.js';
 import { rankSessions } from './router.js';
 import { decideRoute, decideFollowup, decideModel, probeLaya, getLaya, layaStatus } from './laya.js';
 import { harnesses, modelConfig, validateModelConfig } from './models.js';
@@ -146,10 +146,16 @@ function withCodexTerminals(list) {
 // A new Claude or Codex window can stop at a startup question (trust this folder, install an update, pick an option)
 // before it takes the message. Shed reads the window, keeps the task open while it waits, and tells the person once.
 const STARTUP_PROMPT = /trust|Update available|update now|Press enter|Enter to confirm|Esc to cancel|❯\s*1\.|›\s*1\.\s|Would you like|Do you want/i;
+const startupScreens = new Map(); // task id -> last background reading of its window
 function startupPrompt(task) {
   if (!task.tty || Date.now() - Date.parse(task.createdAt) < 12000) return '';
-  let screen = '';
-  try { screen = readTerminal(task.tty, 16) || ''; } catch { return ''; }
+  const reading = startupScreens.get(task.id) || { at:0, text:'', pending:false };
+  startupScreens.set(task.id, reading);
+  if (!reading.pending && Date.now() - reading.at > 8000) {
+    reading.pending = true;
+    readTerminalAsync(task.tty, 16).then(text => { reading.text = text || ''; }).catch(() => {}).finally(() => { reading.at = Date.now(); reading.pending = false; });
+  }
+  const screen = reading.text;
   if (!STARTUP_PROMPT.test(screen)) return '';
   const waiting = screen.split('\n').map(l => l.trim()).filter(Boolean).slice(-4).join(' · ').slice(0, 220);
   if (!task.waitNotified) {
@@ -177,14 +183,14 @@ function refreshCodexTerminalTask(task) {
   const alive = pidOnTty(task.tty, 'codex');
   if (!alive) return { status:'failed', undelivered:true, error:'The Codex window closed before it received this message.' };
   if (age > 8000 && codexWorkState(task.transcriptFile) !== 'working' && (task.submitRetries || 0) < 3 && Date.now() - (task.lastSubmitRetry || 0) > 6000) {
-    try { typeIntoTerminal(task.tty, '', { agent:'codex' }); } catch {}
+    typeIntoTerminalAsync(task.tty, '', { agent:'codex' }).catch(() => {});
     task.submitRetries = (task.submitRetries || 0) + 1; task.lastSubmitRetry = Date.now();
   }
   if (age > 300000 && !startupPrompt(task)) return { status:'failed', undelivered:true, error:'Codex has not recorded this message after five minutes. Check the Terminal window on the Mac.' };
   return null;
 }
 function refreshTerminalTasks() {
-  const running = tasks.filter(task => task.delivery === 'terminal' && task.status === 'running');
+  const running = tasks.filter(task => task.delivery === 'terminal' && task.status === 'running' && !task.starting);
   if (!running.length) return;
   const live = claudeLiveSessions();
   let changed = false;
@@ -225,7 +231,7 @@ function refreshTerminalTasks() {
     else if (!progress.found && Date.now() - Date.parse(task.createdAt) > 300000 && !startupPrompt(task)) { status = 'failed'; error = 'Claude has not recorded this message after five minutes. Check the terminal on the Mac.'; task.undelivered = true; }
     // An idle session that still has not recorded the message is most likely holding it unsent in its input box.
     else if (!progress.found && info?.status === 'idle' && task.tty && Date.now() - Date.parse(task.createdAt) > 8000 && (task.submitRetries || 0) < 3 && Date.now() - (task.lastSubmitRetry || 0) > 6000) {
-      try { typeIntoTerminal(task.tty, '', { agent:'claude' }); } catch { /* The tab check below reports a closed tab. */ }
+      typeIntoTerminalAsync(task.tty, '', { agent:'claude' }).catch(() => {});
       task.submitRetries = (task.submitRetries || 0) + 1; task.lastSubmitRetry = Date.now(); changed = true;
     }
     const output = progress.output || task.output;
@@ -304,7 +310,9 @@ async function planTask(input) {
 }
 
 async function routeInput(input, preview = false) {
-  const health = await refreshHarnessHealth();
+  const cachedHealth = harnessHealth();
+  const health = Object.keys(cachedHealth || {}).length ? cachedHealth : await refreshHarnessHealth();
+  if (Object.keys(cachedHealth || {}).length) refreshHarnessHealth().catch(() => {});
   const healthyHarnesses = Object.entries(health).filter(([, status]) => status.state === 'ready').map(([name]) => name);
   if (input.harness && input.harness !== 'auto' && !healthyHarnesses.includes(input.harness)) throw new Error(health[input.harness]?.detail || `${input.harness} is not ready.`);
   const all = sessions();
@@ -485,14 +493,21 @@ const loginCommands = { codex:['codex', 'login'], claude:['claude', 'auth', 'log
 const loginTerminals = new Map();
 
 // Claude runs in a visible Terminal: typed into the tab that already holds the session, or a new window that resumes it.
+// The request returns as soon as the task exists; typing into Terminal (about a second of AppleScript and a pause)
+// runs in the background, so sending feels instant and the server keeps answering other requests meanwhile.
 function startTerminalTask(task, route, modelDecision, cwd, agentPrompt, skipPermissions) {
+  Object.assign(task, { delivery:'terminal', agentPrompt, starting:true, output:'Sending to the terminal…' });
+  saveTasks();
+  deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, skipPermissions).finally(() => { delete task.starting; saveTasks(); });
+}
+async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, skipPermissions) {
   const session = route.session;
   const label = task.harness === 'codex' ? 'Codex' : 'Claude';
-  Object.assign(task, { delivery:'terminal', agentPrompt });
   try {
     // Only type into a session's window while the agent is still running there; otherwise resume it in a new window.
     if (session?.tty && agentInForeground(session.tty, task.harness)) {
-      typeIntoTerminal(session.tty, agentPrompt, { prompt:true, agent:task.harness });
+      Object.assign(task, { tty:session.tty });
+      await typeIntoTerminalAsync(session.tty, agentPrompt, { prompt:true, agent:task.harness });
       Object.assign(task, { tty:session.tty, transcriptFile:session.file, [task.harness === 'codex' ? 'nativeSessionId' : 'claudeSessionId']:session.nativeId, permissions:'terminal', output:`Typed into the open Terminal tab. Waiting for ${label} to pick it up.` });
     } else if (task.harness === 'codex') {
       const promptDir = path.join(dataDir, 'prompts');
@@ -501,7 +516,7 @@ function startTerminalTask(task, route, modelDecision, cwd, agentPrompt, skipPer
       fs.writeFileSync(promptFile, agentPrompt, { mode:0o600 });
       // --no-alt-screen keeps Codex's output in Terminal's scrollback, which is what the drawer's terminal view reads.
       const argv = ['codex', ...(session ? ['resume', session.nativeId] : []), '--no-alt-screen', ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-bypass-approvals-and-sandbox'] : [])];
-      const tty = openTerminal(cwd, argv, promptFile);
+      const tty = await openTerminalAsync(cwd, argv, promptFile);
       Object.assign(task, { tty, permissions:skipPermissions ? 'skip' : 'default', ...(session ? { transcriptFile:session.file, nativeSessionId:session.nativeId } : {}), output:`Opened a new Terminal window on the Mac (${tty.replace('/dev/', '')}).${skipPermissions ? '' : ' Codex will ask there before running commands; answer from the Terminal view.'}` });
     } else {
       const promptDir = path.join(dataDir, 'prompts');
@@ -509,7 +524,7 @@ function startTerminalTask(task, route, modelDecision, cwd, agentPrompt, skipPer
       const promptFile = path.join(promptDir, `${task.id}.txt`);
       fs.writeFileSync(promptFile, agentPrompt, { mode:0o600 });
       const argv = ['claude', ...(session ? ['--resume', session.nativeId] : []), ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-skip-permissions'] : [])];
-      const tty = openTerminal(cwd, argv, promptFile);
+      const tty = await openTerminalAsync(cwd, argv, promptFile);
       Object.assign(task, { tty, permissions:skipPermissions ? 'skip' : 'default', output:`Opened a new Terminal window on the Mac (${tty.replace('/dev/', '')}).${skipPermissions ? '' : ' Claude will ask there before using tools; answer from the Terminal view.'}` });
     }
     task.updatedAt = new Date().toISOString();
@@ -741,15 +756,15 @@ const server = http.createServer(async (req, res) => {
       if (loginMatch[2] === 'login' && req.method === 'POST') {
         if (!available[name]) return send(res, 400, { error:`${name} is not installed on this Mac.` });
         const existing = loginTerminals.get(name);
-        if (existing && readTerminal(existing, 1) !== null) return send(res, 200, { tty:existing });
-        const tty = openTerminal(os.homedir(), loginCommands[name]);
+        if (existing && (await readTerminalAsync(existing, 1)) !== null) return send(res, 200, { tty:existing });
+        const tty = await openTerminalAsync(os.homedir(), loginCommands[name]);
         loginTerminals.set(name, tty);
         return send(res, 200, { tty });
       }
       const tty = loginTerminals.get(name);
       if (!tty) return send(res, 404, { error:'No sign-in window is open for this harness.' });
       if (req.method === 'GET') {
-        const text = readTerminal(tty);
+        const text = await readTerminalAsync(tty);
         if (text === null) { loginTerminals.delete(name); return send(res, 404, { error:'The sign-in window was closed.' }); }
         return send(res, 200, { tty, text });
       }
@@ -757,7 +772,7 @@ const server = http.createServer(async (req, res) => {
         const input = await body(req);
         if (typeof input.text !== 'string' || input.text.length > 4000) return send(res, 400, { error:'Send up to 4,000 characters.' });
         if (!agentInForeground(tty, [loginCommands[name][0], 'node'])) return send(res, 409, { error:'The sign-in has finished in that window, so Shed will not type into it.' });
-        typeIntoTerminal(tty, input.text);
+        await typeIntoTerminalAsync(tty, input.text);
         return send(res, 200, { ok:true });
       }
     }
@@ -767,14 +782,14 @@ const server = http.createServer(async (req, res) => {
       const task = tasks.find(t => t.id === taskTerminal[1]);
       if (!task?.tty) return send(res, 404, { error:'This task has no Terminal window.' });
       if (req.method === 'GET') {
-        const text = readTerminal(task.tty);
+        const text = await readTerminalAsync(task.tty);
         return text === null ? send(res, 404, { error:'That Terminal window is closed.' }) : send(res, 200, { tty:task.tty, text });
       }
       if (req.method === 'POST') {
         const input = await body(req);
         if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here.' });
         if (!agentInForeground(task.tty, [task.harness, 'node'])) return send(res, 409, { error:`${task.harness} is no longer running in that Terminal window.` });
-        typeIntoTerminal(task.tty, input.text);
+        await typeIntoTerminalAsync(task.tty, input.text);
         return send(res, 200, { ok:true });
       }
     }
@@ -787,7 +802,7 @@ const server = http.createServer(async (req, res) => {
       if (!session) return send(res, 404, { error:'Session not found.' });
       if (!session.tty) return send(res, 404, { error:'This session is not open in a Terminal tab.' });
       if (req.method === 'GET') {
-        const text = readTerminal(session.tty);
+        const text = await readTerminalAsync(session.tty);
         return text === null ? send(res, 404, { error:'That Terminal tab is no longer open.' }) : send(res, 200, { tty:session.tty, text });
       }
       if (req.method === 'POST') {
@@ -795,7 +810,7 @@ const server = http.createServer(async (req, res) => {
         // Only the on-screen control keys, and only while the agent is the foreground program: never free text into a shell.
         if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here. Send messages from the message box.' });
         if (!agentInForeground(session.tty, session.harness)) return send(res, 409, { error:`${session.harness} is no longer running in that Terminal tab.` });
-        typeIntoTerminal(session.tty, input.text);
+        await typeIntoTerminalAsync(session.tty, input.text);
         return send(res, 200, { ok:true });
       }
     }
