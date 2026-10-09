@@ -14,3 +14,7 @@ video/out/
 # OS noise
 .DS_Store
 *.log
+
+# Website build output and Vercel link
+site/dist/
+.vercel/

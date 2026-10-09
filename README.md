@@ -2,6 +2,12 @@
 
 *Powered by Laya.*
 
+**Website:** https://shed-sigma.vercel.app
+
+[![Shed: a one-minute tour](site/tour-poster.jpg)](https://shed-sigma.vercel.app/#tour)
+
+▶ [Watch the one-minute tour](https://shed-sigma.vercel.app/#tour) · [Download the video (MP4)](https://shed-sigma.vercel.app/shed-tour.mp4)
+
 A local, internet-accessible task plane for desktop coding agents. It shows sessions that are currently open in Codex, Claude Code, Gemini, Pi, and OpenCode, refreshes their transcripts, and lets you continue them from a browser. You can also start a completely new coding session from a phone when no desktop session exists.
 
 ## Open it
@@ -101,3 +107,9 @@ npm test
 ```
 
 The integration test uses an isolated home directory and a fake Codex CLI. Unit tests cover Laya choice validation, model routing, live-process matching, and model-roster validation without loading the production model.
+
+## Website and video
+
+The landing page lives in `site/` and is deployed to Vercel at https://shed-sigma.vercel.app. `site/index.html` is the page itself; `site/build.mjs` wraps it into a full HTML document with sharing tags and copies the video into `site/dist/`, which Vercel serves. To deploy a change, run `vercel deploy --prod` from `site/`.
+
+The tour video is a Remotion project in `video/`: `npx remotion render src/index.ts ShedTour out/shed-tour.mp4`, then copy the result to `site/shed-tour.mp4`.
