@@ -547,3 +547,21 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 .message.pending .message-body { opacity: .85; }
 .pending-status { margin-top: 6px; font: 500 12px var(--mono); color: var(--green); text-align: right; }
 .message.pending.failed .pending-status { color: var(--accent); }
+
+/* Desktop chat bar: a roomy, growing message box; session and model as compact chips; Send on the right */
+.composer-hint { display: none; }
+@media (min-width: 701px) {
+  .drawer-composer { gap: 10px; padding: 14px 20px 16px; }
+  .drawer-composer textarea { font: 400 15px/1.5 var(--sans); padding: 12px 14px; min-height: 52px; max-height: 35vh; resize: none; border-radius: 12px; }
+  .drawer-actions { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
+  .drawer-actions select { height: 32px; padding: 0 28px 0 12px; border-radius: 999px; font: 500 12.5px var(--sans); max-width: 220px; text-overflow: ellipsis; }
+  .drawer-actions .skip-permissions { font-size: 12.5px; }
+  .composer-hint { display: inline; margin-left: auto; font: 11.5px var(--mono); color: var(--quiet); white-space: nowrap; }
+  #followup-send { min-width: 92px; height: 36px; border-radius: 10px; }
+}
+/* Desktop terminal: a wider drawer showing the terminal as laid out, no re-wrapping */
+@media (min-width: 901px) {
+  .detail-drawer.wide { width: min(1060px, 96vw); }
+  .detail-drawer.wide .terminal-view { white-space: pre; word-break: normal; font-size: 12.5px; line-height: 1.5; }
+  .detail-drawer.wide .terminal-scroll { overflow: auto; }
+}

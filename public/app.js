@@ -249,7 +249,7 @@ function render() {
 async function refresh() { try { const [s,t] = await Promise.all([api('/api/sessions'), api('/api/tasks')]); state.sessions = s.sessions; state.tasks = t.tasks; renderProjects(); render(); if (state.selectedTask) openTask(state.selectedTask, true); if (state.selectedSession) openSession(state.selectedSession.id, true); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
 async function init() { try { const me = await api('/api/me'); Object.assign(state, me); hideAuth(); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); await Promise.all([refresh(), loadModels(), refreshHarnessHealth(), loadConnect()]); setupPush(); loadDevices(); openFromUrl(location.href); $('#phone-message').classList.toggle('hidden', state.view !== 'inbox'); const requestedView = new URL(location.href).searchParams.get('view'); if (['sessions','activity','settings'].includes(requestedView)) setView(requestedView); } catch (error) { if (error.message === 'Authentication required.') showAuth(); else showFeedback(error.message); } }
 async function previewRoute() { const prompt = $('#prompt').value.trim(); if (prompt.length < 9) { $('#route-preview').classList.add('hidden'); return; } try { const selectedProject = $('#project-select').value; const data = await api('/api/route', { method:'POST', body:JSON.stringify({prompt, harness:$('#harness-select').value, model:$('#model-select').value, cwd:selectedProject === '__new__' ? '' : selectedProject, newWorkspace:selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:true}) }); if ($('#prompt').value.trim() !== prompt) return; const route = data.route; $('#route-preview').innerHTML = `<span class="route-symbol">✦</span><span><b>Local preview:</b> New ${escapeHtml(route.harness)} session · ${escapeHtml(route.reason)} · ${escapeHtml(route.model || 'harness default')} model</span>`; $('#route-preview').classList.remove('hidden'); } catch { $('#route-preview').classList.add('hidden'); } }
-async function sendTask(prompt, options = {}) { if (!prompt.trim()) return; const button = options.sessionId ? $('#followup-send') : $('#send-button'); button.disabled = true; try { const selectedProject = $('#project-select').value; const isNew = !options.sessionId; const {task} = await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, harness:options.harness || $('#harness-select').value, model:options.model ?? (options.sessionId ? $('#followup-model').value : $('#model-select').value), cwd:options.cwd ?? (selectedProject === '__new__' ? '' : selectedProject), newWorkspace:isNew && selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:isNew, sessionId:options.sessionId || null, followup:options.followup || 'auto', skipPermissions:options.sessionId ? $('#followup-skip').checked : $('#skip-permissions').checked }) }); $('#prompt').value = ''; $('#followup-prompt').value = ''; state.followupPreviewKey = null; $('#followup-preview').classList.add('hidden'); $('#new-workspace').value = ''; $('#route-preview').classList.add('hidden');
+async function sendTask(prompt, options = {}) { if (!prompt.trim()) return; const button = options.sessionId ? $('#followup-send') : $('#send-button'); button.disabled = true; try { const selectedProject = $('#project-select').value; const isNew = !options.sessionId; const {task} = await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, harness:options.harness || $('#harness-select').value, model:options.model ?? (options.sessionId ? $('#followup-model').value : $('#model-select').value), cwd:options.cwd ?? (selectedProject === '__new__' ? '' : selectedProject), newWorkspace:isNew && selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:isNew, sessionId:options.sessionId || null, followup:options.followup || 'auto', skipPermissions:options.sessionId ? $('#followup-skip').checked : $('#skip-permissions').checked }) }); $('#prompt').value = ''; $('#followup-prompt').value = ''; $('#followup-prompt').style.height = ''; state.followupPreviewKey = null; $('#followup-preview').classList.add('hidden'); $('#new-workspace').value = ''; $('#route-preview').classList.add('hidden');
   if (options.sessionId && !task.handoffFrom) { state.pending.push({ taskId:task.id, sessionId:options.sessionId, text:prompt.trim(), at:Date.now() }); state.pinBottom = true; await refresh(); return true; }
   state.followTask = task.id; await refresh(); openTask(task.id); return true; } catch (error) { showFeedback(error.message); return false; } finally { button.disabled = false; } }
 // The conversation stays pinned to its newest message until the person scrolls up, and re-pins at the bottom.
@@ -276,6 +276,7 @@ function showPane(pane) {
   $('#drawer-terminal').classList.toggle('hidden', pane !== 'terminal');
   $('#drawer-files').classList.toggle('hidden', pane !== 'files');
   $('.drawer-composer').classList.toggle('in-terminal', pane !== 'conversation');
+  $('#detail-drawer').classList.toggle('wide', pane === 'terminal');
   if (pane === 'terminal') setTimeout(() => loadTerminal(true), 0); // after openDrawer() has made the drawer visible
   if (pane === 'files') loadFiles();
 }
@@ -413,6 +414,7 @@ function terminalTarget() {
 }
 // Terminal apps pad lines to the window width and wrap long text themselves (continuation lines indented by two
 // spaces). On a phone that wraps twice, so padding is trimmed, wrapped paragraphs are rejoined and long rules shortened.
+const wideTerminal = matchMedia('(min-width: 901px)');
 function tidyTerminal(text) {
   const lines = text.split('\n').map(line => line.replace(/\s+$/, ''));
   const out = [];
@@ -435,12 +437,14 @@ async function loadTerminal(reset = false) {
     const screen = text.split('\n').slice(-20).join('\n');
     $('#terminal-controls').classList.toggle('asking', /Esc to cancel|Enter to confirm|❯\s*1\.|Would you like to|Press enter to confirm|›\s*1\.\s/i.test(screen));
     const atBottom = reset || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
-    view.textContent = tidyTerminal(text); view.dataset.text = text;
+    // A wide desktop drawer shows the terminal exactly as laid out; a phone gets the reflowed version.
+    view.textContent = wideTerminal.matches ? text.split('\n').map(line => line.replace(/\s+$/, '')).join('\n').replace(/\n{3,}/g, '\n\n') : tidyTerminal(text);
+    view.dataset.text = text;
     if (atBottom) scroller.scrollTop = scroller.scrollHeight;
   } catch (error) { view.textContent = error.message; view.dataset.text = ''; }
 }
 function openDrawer() { $('#detail-drawer').classList.remove('hidden'); $('#drawer-backdrop').classList.remove('hidden'); }
-function closeDrawer() { state.selectedSession = null; state.selectedTask = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#detail-drawer').classList.add('hidden'); $('#drawer-backdrop').classList.add('hidden'); }
+function closeDrawer() { $('#detail-drawer').classList.remove('wide'); state.selectedSession = null; state.selectedTask = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#detail-drawer').classList.add('hidden'); $('#drawer-backdrop').classList.add('hidden'); }
 // A sent message stays visible below the conversation, with its delivery state, until the transcript shows it.
 function pendingMessages(session, messages) {
   const recorded = new Set(messages.filter(m => m.role === 'user').map(m => m.text.replace(/\s+/g, ' ').trim()));
@@ -643,7 +647,14 @@ $('#followup-send').addEventListener('click', sendFollowup);
 $('#followup-route').addEventListener('change', () => { $('#followup-model').value = ''; renderModelChoices(); if (state.selectedSession) openSession(state.selectedSession.id, true); previewFollowup(); });
 $('#followup-model').addEventListener('change', previewFollowup);
 $('#followup-prompt').addEventListener('input', () => { clearTimeout(state.followupTimer); state.followupTimer = setTimeout(previewFollowup, 700); });
-$('#followup-prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && state.selectedSession) { e.preventDefault(); sendFollowup(); } });
+const desktopKeys = matchMedia('(min-width: 701px) and (pointer: fine)');
+$('#followup-prompt').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || e.isComposing || !state.selectedSession) return;
+  if (e.metaKey || e.ctrlKey || (desktopKeys.matches && !e.shiftKey)) { e.preventDefault(); sendFollowup(); }
+});
+// The message box grows with its text, up to a limit.
+function fitComposer() { const box = $('#followup-prompt'); box.style.height = ''; box.style.height = `${Math.min(box.scrollHeight + 2, Math.round(innerHeight * 0.35))}px`; }
+$('#followup-prompt').addEventListener('input', fitComposer);
 document.addEventListener('click', e => { const row = e.target.closest('[data-session]'); if (row) openSession(row.dataset.session); const task = e.target.closest('[data-task]'); if (task) openTask(task.dataset.task); if (e.target.id === 'cancel-task' && state.selectedTask) api(`/api/tasks/${state.selectedTask}/cancel`, { method:'POST' }).then(refresh).catch(err => showFeedback(err.message)); if (e.target.id === 'open-task-session') { const item = state.tasks.find(t => t.id === state.selectedTask); if (item?.sessionId) openSession(item.sessionId); } });
 document.addEventListener('click', e => { if (e.target.id === 'configure-laya') setView('settings'); });
 $('#test-laya').addEventListener('click', async () => { const el = $('#settings-feedback'); el.textContent = 'Testing the local Laya model…'; el.classList.remove('hidden'); try { const result = await api('/api/laya/test', {method:'POST'}); el.textContent = `${result.model} is running locally. Session and model routing are ready.`; const me = await api('/api/me'); Object.assign(state, me); renderHarnesses(); } catch (error) { el.textContent = `Local model test failed: ${error.message}`; } });
