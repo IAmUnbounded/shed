@@ -107,9 +107,3 @@ npm test
 ```
 
 The integration test uses an isolated home directory and a fake Codex CLI. Unit tests cover Laya choice validation, model routing, live-process matching, and model-roster validation without loading the production model.
-
-## Website and video
-
-The landing page lives in `site/` and is deployed to Vercel at https://shed-sigma.vercel.app. `site/index.html` is the page itself; `site/build.mjs` wraps it into a full HTML document with sharing tags and copies the video into `site/dist/`, which Vercel serves. Vercel is connected to this repo with `site/` as its root, so every push to `main` redeploys the site automatically. To deploy by hand, run `vercel deploy --prod` from `site/`.
-
-The tour video is a Remotion project in `video/`: `npx remotion render src/index.ts ShedTour out/shed-tour.mp4`, then copy the result to `site/shed-tour.mp4`.
