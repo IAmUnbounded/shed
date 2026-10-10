@@ -220,6 +220,12 @@ test('discovers a desktop session and resumes it through the task API', async ()
     }
     assert.equal(freshTask.status, 'completed');
     assert.equal(freshTask.cwd, path.join(home, 'Shed Workspaces', 'phone-project'));
+    // With no project chosen, a new session gets its own folder named from the message, not Shed's code folder.
+    const unnamed = async () => (await (await fetch(`${base}/api/tasks`, { method:'POST', headers, body:JSON.stringify({ prompt:'Please fix the flaky login test', harness:'codex', newSession:true }) })).json()).task;
+    const firstAuto = await unnamed(), secondAuto = await unnamed();
+    assert.equal(firstAuto.cwd, path.join(home, 'Shed Workspaces', 'fix-flaky-login-test'));
+    assert.equal(secondAuto.cwd, path.join(home, 'Shed Workspaces', 'fix-flaky-login-test-2'));
+    assert.ok(fs.statSync(firstAuto.cwd).isDirectory());
     assert.equal(fs.existsSync(freshTask.cwd), true);
   } finally {
     child.kill('SIGTERM');

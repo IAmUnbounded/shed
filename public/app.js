@@ -98,7 +98,20 @@ function renderHarnessAvailability() { const names = {codex:'Codex',claude:'Clau
 function updateHarnessReadiness() { const labels = { needs_auth:'sign in', offline:'offline', unknown:'check login', checking:'checking' }; const select = $('#harness-select'); for (const option of select.options) { if (option.value === 'auto') continue; const status = state.health[option.value]?.state || 'checking'; const label = `${({codex:'Codex',claude:'Claude Code',gemini:'Gemini',pi:'Pi',opencode:'OpenCode'})[option.value]}${status === 'ready' ? '' : ` · ${option.value === 'opencode' && status === 'needs_auth' ? 'connect provider' : labels[status] || 'unavailable'}`}`; if (option.disabled !== (status !== 'ready')) option.disabled = status !== 'ready'; if (option.textContent !== label) option.textContent = label; } if (select.selectedOptions[0]?.disabled) { select.value = 'auto'; renderModelChoices(); } }
 function renderHealthDetails() { const issues = Object.entries(state.health).filter(([name, status]) => state.available[name] && status.state !== 'ready' && status.state !== 'checking'); if (issues.length) $('#harness-list').insertAdjacentHTML('beforeend', `<div class="harness-health-details">${issues.map(([name, status]) => `<div><b>${escapeHtml(({codex:'Codex',claude:'Claude Code',gemini:'Gemini',pi:'Pi',opencode:'OpenCode'})[name])}:</b> ${escapeHtml(status.detail)}</div>`).join('')}</div>`); }
 async function refreshHarnessHealth() { try { const data = await api('/api/harness-health'); state.health = data.harnesses || {}; renderHarnesses(); updateHarnessReadiness(); syncPhoneHarness(); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
-function renderProjects() { const select = $('#project-select'); const current = select.value; const cwds = [...new Set(state.sessions.map(s => s.cwd).filter(Boolean))].sort((a,b) => projectName(a).localeCompare(projectName(b))); setOptions(select, '<option value="">Shed workspace</option><option value="__new__">+ New workspace</option>' + cwds.map(cwd => `<option value="${escapeHtml(cwd)}">${escapeHtml(projectName(cwd))}</option>`).join('')); select.value = [...select.options].some(option => option.value === current) ? current : ''; toggleNewWorkspace(); }
+// The phone bar's project picker mirrors the composer's: a new folder (named from the message), a named new
+// workspace, or any project a session already uses.
+function syncPhoneProject() {
+  const source = $('#project-select'), picker = $('#phone-project'), current = picker.value;
+  const html = [...source.options].map(o => `<option value="${escapeHtml(o.value)}">${o.value === '' ? '▣ New folder' : o.value === '__new__' ? '+ New workspace…' : `▣ ${escapeHtml(o.textContent)}`}</option>`).join('');
+  setOptions(picker, html);
+  picker.value = [...picker.options].some(o => o.value === current) ? current : '';
+}
+$('#phone-project').addEventListener('change', () => {
+  const naming = $('#phone-project').value === '__new__';
+  $('#phone-workspace').classList.toggle('hidden', !naming);
+  if (naming) $('#phone-workspace').focus();
+});
+function renderProjects() { const select = $('#project-select'); const current = select.value; const cwds = [...new Set(state.sessions.map(s => s.cwd).filter(Boolean))].sort((a,b) => projectName(a).localeCompare(projectName(b))); setOptions(select, '<option value="">New folder from your message</option><option value="__new__">+ New workspace</option>' + cwds.map(cwd => `<option value="${escapeHtml(cwd)}">${escapeHtml(projectName(cwd))}</option>`).join('')); select.value = [...select.options].some(option => option.value === current) ? current : ''; toggleNewWorkspace();  syncPhoneProject(); }
 function toggleNewWorkspace() { $('#new-workspace-row').classList.toggle('hidden', $('#project-select').value !== '__new__'); }
 function modelOptions(harness) { return (modelState.configs[harness]?.models || []).filter(model => model.enabled).map(model => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.label || model.id)}</option>`).join(''); }
 function renderModelChoices() {
@@ -707,7 +720,13 @@ async function sendPhoneMessage() {
   const box = $('#phone-message-input'), text = box.value;
   if (!text.trim()) return;
   $('#harness-select').value = $('#phone-harness').value; renderModelChoices();
-  if (await sendTask(text)) { box.value = ''; box.style.height = ''; }
+  const project = $('#phone-project').value, workspace = $('#phone-workspace').value.trim();
+  if (project === '__new__' && !workspace) { $('#phone-workspace').focus(); return showFeedback('Name the new workspace first.'); }
+  $('#project-select').value = project; $('#new-workspace').value = project === '__new__' ? workspace : ''; toggleNewWorkspace();
+  if (await sendTask(text)) {
+    box.value = ''; box.style.height = '';
+    if (project === '__new__') { $('#phone-workspace').value = ''; $('#phone-workspace').classList.add('hidden'); $('#phone-project').value = ''; }
+  }
 }
 $('#phone-message').addEventListener('submit', e => { e.preventDefault(); sendPhoneMessage(); });
 $('#phone-message-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendPhoneMessage(); } });

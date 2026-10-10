@@ -347,6 +347,17 @@ async function planTask(input) {
   return { input, route, cwd, model };
 }
 
+const FILLER = new Set(['a', 'an', 'the', 'to', 'for', 'my', 'me', 'of', 'and', 'in', 'on', 'with', 'please', 'can', 'you', 'i', 'it', 'this', 'that', 'is', 'are', 'be', 'some', 'our', 'we', 'us', 'hey', 'hi', 'could', 'would', 'should', 'let', 'lets']);
+function autoWorkspace(prompt, preview) {
+  const words = String(prompt || '').toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(w => w && !FILLER.has(w));
+  const slug = words.slice(0, 4).join('-').replace(/-+/g, '-').slice(0, 40).replace(/^-|-$/g, '') || 'session';
+  const root = path.join(os.homedir(), 'Shed Workspaces');
+  let name = slug;
+  for (let n = 2; fs.existsSync(path.join(root, name)); n++) name = `${slug}-${n}`;
+  const folder = path.join(root, name);
+  if (!preview) fs.mkdirSync(folder, { recursive:true });
+  return folder;
+}
 async function routeInput(input, preview = false) {
   const cachedHealth = harnessHealth();
   const health = Object.keys(cachedHealth || {}).length ? cachedHealth : await refreshHarnessHealth();
@@ -362,6 +373,8 @@ async function routeInput(input, preview = false) {
     requestedCwd = path.join(workspaceRoot, name);
     if (!preview) fs.mkdirSync(requestedCwd, { recursive:true });
   }
+  // A new session with no project gets a folder of its own, named from the message, never Shed's own code folder.
+  if (!requestedCwd && !input.sessionId && input.newSession) requestedCwd = autoWorkspace(input.prompt, preview);
   const candidates = input.newSession ? [] : all.filter(s => s.liveState !== 'working' && (!requestedCwd || s.cwd === requestedCwd) && (s.harness !== 'gemini' || Boolean(s.cwd)) && (input.harness && input.harness !== 'auto' ? s.harness === input.harness : healthyHarnesses.includes(s.harness)));
   const fallback = input.harness && input.harness !== 'auto' ? input.harness : healthyHarnesses[0];
   if (!fallback && !input.sessionId) throw new Error('No coding harness is ready. Check the harness status in the sidebar.');

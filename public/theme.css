@@ -568,3 +568,14 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 
 .reconnecting { position: fixed; top: calc(12px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 70; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; background: var(--ink); color: #fff; font: 500 13px var(--sans); box-shadow: 0 8px 24px #0003; }
 .reconnecting span { width: 8px; height: 8px; border-radius: 50%; background: #f0b25a; animation: waiting 1.2s ease-in-out infinite; }
+
+/* Phone message bar: agent and project pickers above the message box */
+@media (max-width: 700px) {
+  .phone-message:not(.hidden) { flex-direction: column; align-items: stretch; gap: 8px; padding: 10px !important; border-radius: 20px; }
+  .phone-options { display: flex; gap: 8px; overflow-x: auto; }
+  .phone-message .phone-options select { flex: 0 1 auto; min-width: 0; max-width: 62%; }
+  #phone-workspace { height: 40px; border: 1px solid var(--accent); border-radius: 12px; padding: 0 12px; font: 16px var(--sans); background: var(--surface); color: var(--ink); outline: none; }
+  .phone-row { display: flex; align-items: flex-end; gap: 8px; }
+  .phone-row textarea { flex: 1; min-width: 0; }
+  #view-inbox { padding-bottom: 150px; }
+}
