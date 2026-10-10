@@ -323,7 +323,7 @@ function connectEvents() {
   events.addEventListener('sessions', () => refresh());
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && $('#auth-screen').classList.contains('hidden')) { connectEvents(); refresh(); loadTerminal(); } });
-async function init() { try { const me = await api('/api/me'); Object.assign(state, me); hideAuth(); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); await Promise.all([refresh(), loadModels(), refreshHarnessHealth(), loadConnect()]); setupPush(); loadDevices(); connectEvents(); openFromUrl(location.href); $('#phone-message').classList.toggle('hidden', state.view !== 'inbox'); const requestedView = new URL(location.href).searchParams.get('view'); if (['sessions','activity','settings'].includes(requestedView)) setView(requestedView); } catch (error) { if (error.message === 'Authentication required.') showAuth(); else showFeedback(error.message); } }
+async function init() { try { const me = await api('/api/me'); Object.assign(state, me); hideAuth(); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); await Promise.all([refresh(), loadModels(), refreshHarnessHealth(), loadConnect()]); setupPush(); loadDevices(); loadPro(); connectEvents(); openFromUrl(location.href); $('#phone-message').classList.toggle('hidden', state.view !== 'inbox'); const requestedView = new URL(location.href).searchParams.get('view'); if (['sessions','activity','settings'].includes(requestedView)) setView(requestedView); } catch (error) { if (error.message === 'Authentication required.') showAuth(); else showFeedback(error.message); } }
 async function previewRoute() { const prompt = $('#prompt').value.trim(); if (prompt.length < 9) { $('#route-preview').classList.add('hidden'); return; } try { const selectedProject = $('#project-select').value; const data = await api('/api/route', { method:'POST', body:JSON.stringify({prompt, harness:$('#harness-select').value, model:$('#model-select').value, cwd:selectedProject === '__new__' ? '' : selectedProject, newWorkspace:selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:true}) }); if ($('#prompt').value.trim() !== prompt) return; const route = data.route; $('#route-preview').innerHTML = `<span class="route-symbol">✦</span><span><b>Local preview:</b> New ${escapeHtml(route.harness)} session · ${escapeHtml(route.reason)} · ${escapeHtml(route.model || 'harness default')} model</span>`; $('#route-preview').classList.remove('hidden'); } catch { $('#route-preview').classList.add('hidden'); } }
 async function sendTask(prompt, options = {}) { if (!prompt.trim()) return; const button = options.sessionId ? $('#followup-send') : $('#send-button'); button.disabled = true; try { const selectedProject = $('#project-select').value; const isNew = !options.sessionId; const {task} = await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, harness:options.harness || $('#harness-select').value, model:options.model ?? (options.sessionId ? $('#followup-model').value : $('#model-select').value), cwd:options.cwd ?? (selectedProject === '__new__' ? '' : selectedProject), newWorkspace:isNew && selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:isNew, sessionId:options.sessionId || null, followup:options.followup || 'auto', skipPermissions:options.sessionId ? $('#followup-skip').checked : $('#skip-permissions').checked }) }); $('#prompt').value = ''; $('#followup-prompt').value = ''; $('#followup-prompt').style.height = ''; state.followupPreviewKey = null; $('#followup-preview').classList.add('hidden'); $('#new-workspace').value = ''; $('#route-preview').classList.add('hidden');
   if (options.sessionId && !task.handoffFrom) { state.pending.push({ taskId:task.id, sessionId:options.sessionId, text:prompt.trim(), at:Date.now() }); state.pinBottom = true; await refresh(); return true; }
@@ -373,6 +373,39 @@ async function deviceAction(id, action) { try { await api(`/api/devices/${encode
 $('#device-list').addEventListener('click', e => { const a = e.target.closest('[data-approve]'), r = e.target.closest('[data-revoke]'); if (a) deviceAction(a.dataset.approve, 'approve'); if (r) deviceAction(r.dataset.revoke, 'revoke'); });
 $('#approve-yes').addEventListener('click', () => deviceAction($('#approve-toast').dataset.device, 'approve'));
 $('#approve-no').addEventListener('click', () => deviceAction($('#approve-toast').dataset.device, 'revoke'));
+// Shed Pro: the permanent address. Only the Mac can turn it on or off, because it changes the link phones use.
+async function loadPro() {
+  let pro;
+  try { pro = await api('/api/pro'); } catch { return; }
+  $('#pro-badge').textContent = pro.active ? 'PRO' : 'FREE';
+  $('#pro-buy').href = pro.buyUrl;
+  $('#pro-suffix').textContent = pro.domain ? `.${pro.domain}` : '';
+  $('#pro-buy').classList.toggle('hidden', pro.active);
+  $('#pro-form').classList.toggle('hidden', pro.active || !pro.canChange);
+  $('#pro-deactivate').classList.toggle('hidden', !pro.active || !pro.canChange);
+  $('#pro-copy').innerHTML = pro.active
+    ? `Your permanent address is <b>${escapeHtml(pro.url)}</b>. Open it on your phone and add it to your Home Screen; it will not change.`
+    : pro.canChange ? 'Get a permanent address, so the link on your phone and its notifications never break when the tunnel restarts. Paste your licence key and pick a name.'
+    : 'Get a permanent address, so the link on your phone and its notifications never break when the tunnel restarts. Turn it on from Shed on your Mac.';
+  $('#remote-note').textContent = pro.active ? 'On the same Wi-Fi, you can also use:' : 'This temporary link changes when the tunnel restarts. On the same Wi-Fi, you can also use:';
+}
+function proFeedback(message) { const el = $('#pro-feedback'); el.textContent = message; el.classList.remove('hidden'); }
+$('#pro-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('#pro-activate'); button.disabled = true; proFeedback('Setting up your address. This takes about ten seconds…');
+  try {
+    const pro = await api('/api/pro/activate', { method:'POST', body:JSON.stringify({ licenseKey:$('#pro-key').value, name:$('#pro-name').value }) });
+    proFeedback(`Done. ${pro.url} will answer within a minute. Phones need to open the new address and sign in once more.`);
+    $('#pro-key').value = '';
+    loadPro(); setTimeout(loadConnect, 15000);
+  } catch (error) { proFeedback(error.message); }
+  finally { button.disabled = false; }
+});
+$('#pro-deactivate').addEventListener('click', async () => {
+  if (!confirm('Turn off Shed Pro on this Mac? Phones will need the new temporary link.')) return;
+  try { await api('/api/pro/deactivate', { method:'POST' }); proFeedback('Pro is off. Shed is back on a temporary link.'); loadPro(); setTimeout(loadConnect, 15000); }
+  catch (error) { proFeedback(error.message); }
+});
 $('#revoke-others').addEventListener('click', async () => { try { await api('/api/devices/revoke-others', { method:'POST' }); loadDevices(); } catch (error) { showFeedback(error.message); } });
 setInterval(() => { if ($('#auth-screen').classList.contains('hidden') && (state.local || state.view === 'settings')) loadDevices(); }, 5000);
 // Notifications: Web Push through Shed's service worker. On iPhone this needs Shed on the Home Screen (iOS 16.4+).

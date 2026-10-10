@@ -582,3 +582,12 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 
 .update-banner { position: fixed; top: calc(12px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 70; display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; border-radius: 999px; background: var(--ink); color: #fff; font: 500 14px var(--sans); box-shadow: 0 8px 24px #0003; }
 .update-banner button { border: 0; border-radius: 999px; background: var(--accent); color: #fff; font: 600 14px var(--sans); padding: 8px 14px; }
+
+/* Shed Pro card in Settings */
+#pro-settings h3 { display:flex; align-items:center; gap:10px; }
+.pro-form { display:grid; gap:10px; margin:14px 0 6px; max-width:520px; }
+.pro-form input { width:100%; box-sizing:border-box; font:inherit; font-family:var(--mono); font-size:16px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink); }
+.pro-name { display:flex; align-items:center; gap:8px; }
+.pro-name input { flex:1; min-width:0; }
+.pro-name span { font-family:var(--mono); color:var(--muted); font-size:13px; white-space:nowrap; }
+.pro-form .send-button { justify-self:start; }

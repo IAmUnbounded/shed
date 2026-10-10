@@ -1,6 +1,8 @@
 {
-  "name": "laya-task-plane",
-  "version": "0.1.0",
+  "name": "shed",
+  "version": "0.2.0",
+  "description": "Message the coding agents on your Mac from your phone.",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {

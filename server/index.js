@@ -15,6 +15,7 @@ import { harnesses, modelConfig, validateModelConfig } from './models.js';
 import { harnessHealth, refreshHarnessHealth } from './health.js';
 import { initPush, pushPublicKey, subscribe, unsubscribe, notify, isSubscribed, pushCount } from './notify.js';
 import { listArtifacts, resolveInside, sendFile } from './files.js';
+import { proStore } from './pro.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
@@ -38,6 +39,7 @@ let cached = { at: 0, sessions: [] };
 let tasks = loadTasks();
 let settings = loadSettings();
 initPush(dataDir);
+const pro = proStore(dataDir, { port });
 const attempts = new Map();
 
 function getToken() {
@@ -54,7 +56,8 @@ function getToken() {
 function remoteUrl() {
   try {
     const value = fs.readFileSync(remoteUrlFile, 'utf8').trim();
-    return /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(value) ? value : '';
+    // A Quick Tunnel address, or the permanent Shed Pro hostname; tunnel.js writes it once the tunnel is connected.
+    return /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(value) ? value : '';
   } catch { return ''; }
 }
 function commandExists(command) {
@@ -757,6 +760,14 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { url, link:base, secure:Boolean(remoteUrl()), qr:svg, phoneConnectedAt:settings.phoneConnectedAt || null });
     }
     if (pathname === '/api/me' && req.method === 'GET') return send(res, 200, { ok:true, local:isLocalRequest(req), lanEnabled, pendingDevices:isLocalRequest(req) ? devices().filter(d => d.status === 'pending' && Date.now() - Date.parse(d.createdAt) < 86400000).map(d => publicDevice(d)) : [], phoneConnectedAt:settings.phoneConnectedAt || null, available, laya:layaStatus(), hostname:os.hostname(), phoneUrl:lanEnabled ? `http://${lanAddress()}:${port}` : '', remoteUrl:remoteUrl() });
+    // Shed Pro (a permanent address). Turning it on or off changes the address phones use, so only the Mac can do it.
+    if (pathname === '/api/pro' && req.method === 'GET') return send(res, 200, { ...pro.status(), canChange:isLocalRequest(req) });
+    if ((pathname === '/api/pro/activate' || pathname === '/api/pro/deactivate') && req.method === 'POST') {
+      if (!isLocalRequest(req)) return send(res, 403, { error:'Change Shed Pro on the Mac.' });
+      if (pathname === '/api/pro/deactivate') return send(res, 200, await pro.deactivate());
+      const input = await body(req);
+      return send(res, 200, await pro.activate(String(input.licenseKey || '').trim(), String(input.name || '').trim().toLowerCase()));
+    }
     if (pathname === '/api/harness-health' && req.method === 'GET') return send(res, 200, { harnesses:await refreshHarnessHealth(new URL(req.url, 'http://x').searchParams.get('force') === '1') });
     if (pathname === '/api/settings' && req.method === 'GET') return send(res, 200, { laya:layaStatus(), local:true });
     if (pathname === '/api/laya/test' && req.method === 'POST') return send(res, 200, await probeLaya());
@@ -955,4 +966,6 @@ server.listen(port, host, () => {
   setInterval(() => refreshHarnessHealth().catch(error => console.error(`Harness health check failed: ${error.message}`)), 60000).unref();
   watchAndNotify();
   setInterval(() => { sessions(true); watchAndNotify(); }, 10000).unref();
+  pro.check();
+  setInterval(() => pro.check(), 3600000).unref();
 });
