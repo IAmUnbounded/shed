@@ -56,11 +56,11 @@ for agent in claude codex gemini opencode pi; do command -v "$agent" >/dev/null 
 # The code: a shallow clone, updated in place on later runs (your settings live in the ignored .jev-data folder).
 mkdir -p "$SHED_HOME"
 if [ -d "$APP/.git" ]; then
-  say "Updating $APP…"
+  say "Updating ${APP}…"
   git -C "$APP" fetch --depth 1 origin "$REF" -q
   git -C "$APP" checkout -q -B "$REF" FETCH_HEAD
 else
-  say "Downloading Shed to $APP…"
+  say "Downloading Shed to ${APP}…"
   git clone -q --depth 1 --branch "$REF" "$REPO" "$APP"
 fi
 (cd "$APP" && npm ci --omit=dev --no-audit --no-fund --loglevel=error >/dev/null)
