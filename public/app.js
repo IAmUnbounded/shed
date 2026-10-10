@@ -13,6 +13,18 @@ const $$ = selector => [...document.querySelectorAll(selector)];
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const relative = date => { const diff = Math.max(0, Date.now() - Date.parse(date)); const m = Math.floor(diff / 60000); return m < 1 ? 'now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : m < 10080 ? `${Math.floor(m / 1440)}d ago` : new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
 const projectName = cwd => cwd ? cwd.split('/').filter(Boolean).pop() : 'Unknown project';
+// When the Mac starts serving a newer Shed, reload, unless something is being typed (then offer a Reload button).
+let loadedVersion = '', updatePending = false;
+function noticeVersion(version) {
+  if (!version) return;
+  if (!loadedVersion) { loadedVersion = version; return; }
+  if (version === loadedVersion || updatePending) return;
+  updatePending = true;
+  const typing = ['#phone-message-input', '#followup-prompt', '#prompt', '#terminal-prompt', '#phone-workspace'].some(sel => document.querySelector(sel)?.value?.trim());
+  if (!typing) return location.reload();
+  document.getElementById('update-banner')?.classList.remove('hidden');
+}
+document.getElementById('update-reload')?.addEventListener('click', () => location.reload());
 // While the Mac is restarting Shed or is unreachable, requests fail fast and a small banner says so, instead of the
 // page silently hanging. The banner clears on the next request that gets through.
 function setOffline(offline) { document.getElementById('reconnecting')?.classList.toggle('hidden', !offline); }
@@ -27,6 +39,7 @@ async function api(url, options = {}) {
   try { data = await res.json(); }
   catch { setOffline(res.status >= 500); throw new Error(res.status >= 500 ? 'Cannot reach your Mac right now. Shed may be restarting.' : 'Unexpected response from your Mac.'); }
   setOffline(false);
+  noticeVersion(res.headers.get('X-Shed-Version'));
   if (!res.ok) throw new Error(data.error || 'Request failed');
   return data;
 }

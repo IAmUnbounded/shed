@@ -387,8 +387,16 @@ async function routeInput(input, preview = false) {
   if (!route.session && route.source !== 'laya') route.harness = fallback;
   return { route, cwd: requestedCwd, healthyHarnesses, health };
 }
+// The version of the web app being served (a hash of public/). Every response carries it, so an open page, such as
+// a Home Screen app that resumes without reloading, can tell that Shed was updated and reload itself.
+const appVersion = (() => {
+  const hash = crypto.createHash('sha1');
+  for (const name of fs.readdirSync(publicDir).sort()) { const file = path.join(publicDir, name); if (fs.statSync(file).isFile()) hash.update(name).update(fs.readFileSync(file)); }
+  return hash.digest('base64url').slice(0, 12);
+})();
 // Sent with every response: no framing (stops tap-jacking of approve buttons), no referrer leaks, scripts only from Shed.
 const SECURITY_HEADERS = {
+  'X-Shed-Version':appVersion,
   'X-Frame-Options':'DENY',
   'Referrer-Policy':'no-referrer',
   'X-Content-Type-Options':'nosniff',
