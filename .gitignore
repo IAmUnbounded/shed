@@ -18,3 +18,4 @@ video/out/
 # Website build output and Vercel link
 site/dist/
 .vercel/
+launch/
