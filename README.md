@@ -1,6 +1,6 @@
 # Shed
 
-*Powered by Laya.*
+*Powered by Laya.* MIT licensed.
 
 **Website:** https://shed-sigma.vercel.app
 
@@ -10,11 +10,31 @@
 
 A local, internet-accessible task plane for desktop coding agents. It shows sessions that are currently open in Codex, Claude Code, Gemini, Pi, and OpenCode, refreshes their transcripts, and lets you continue them from a browser. You can also start a completely new coding session from a phone when no desktop session exists.
 
+## Install
+
+```bash
+curl -fsSL https://shed-sigma.vercel.app/install.sh | sh
+```
+
+macOS only. The [installer](site/install.sh) clones Shed into `~/.shed/app` and installs Node and `cloudflared` with Homebrew if they are missing. It then adds two launch agents (`dev.shed.server`, `dev.shed.tunnel`) that start at login, and opens Shed in your browser. Run the same line again to update. To remove Shed:
+
+```bash
+curl -fsSL https://shed-sigma.vercel.app/install.sh | sh -s -- --uninstall
+```
+
+Options (environment variables): `SHED_HOME` (default `~/.shed`), `SHED_PORT` (default 4378), `SHED_REF` (git branch, default `main`).
+
+## Shed Pro
+
+The free tunnel's address changes whenever it restarts, which breaks the Home Screen app and its push notifications. Shed Pro gives the Mac a permanent `https://<name>.shed.link` address.
+
+To turn it on, paste your licence key under **Settings → Shed Pro** on the Mac. Shed asks the relay (`site/api/relay.js`) for a Cloudflare named tunnel and saves its token in `.jev-data/relay.json`. `server/tunnel.js` then switches from the Quick Tunnel to that tunnel. Traffic goes from Cloudflare straight to your Mac; the relay only manages the tunnel, and your password and device approval still apply.
+
 ## Open it
 
 The server starts automatically when this Mac signs in. Open `http://localhost:4378` on the Mac once and choose **Set a password for the first time**. From any Wi-Fi or cellular network, use the HTTPS address shown under **Settings → Phone access** and sign in with that password.
 
-The Mac must stay awake and connected to the internet. The Cloudflare Quick Tunnel URL can change when the tunnel restarts. Its current value is stored in `.jev-data/remote-url`. A named Cloudflare Tunnel is needed for a permanent hostname.
+The Mac must stay awake and connected to the internet. The Cloudflare Quick Tunnel URL can change when the tunnel restarts. Its current value is stored in `.jev-data/remote-url`. Shed Pro gives a permanent hostname.
 
 To run it manually:
 
