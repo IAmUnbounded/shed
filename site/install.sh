@@ -20,6 +20,9 @@ die() { printf '\033[31mShed: %s\033[0m\n' "$1" >&2; exit 1; }
 stop_services() {
   for name in server tunnel; do
     launchctl bootout "$DOMAIN/$LABEL.$name" 2>/dev/null || true
+    # bootout returns before the service is gone, and bootstrapping it again too soon fails.
+    i=0
+    while launchctl print "$DOMAIN/$LABEL.$name" >/dev/null 2>&1 && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
   done
 }
 
