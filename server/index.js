@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript } from './sessions.js';
 import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState } from './live.js';
-import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync } from './terminal.js';
+import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent } from './terminal.js';
 import { rankSessions } from './router.js';
 import { decideRoute, decideFollowup, decideModel, probeLaya, getLaya, layaStatus } from './laya.js';
 import { harnesses, modelConfig, validateModelConfig } from './models.js';
@@ -536,6 +536,36 @@ async function returnToOrigin(task) {
     Object.assign(task, { error:`${task.error} Shed could not send it back to the original session either: ${error.message}`.trim() }); saveTasks();
   }
 }
+// Ending a session: the agent process that holds it (in its Terminal tab, or a background run Shed started).
+// The Terminal window stays open at its shell prompt, so the person can still read what happened.
+function endTarget(session) {
+  if (!session || session.liveState === 'history') return null;
+  if (session.harness === 'claude') {
+    const pid = claudeLiveSessions().get(session.nativeId)?.pid;
+    if (pid) return { pid, command:'claude' };
+  }
+  if (session.harness === 'codex' && session.tty) {
+    const pid = pidOnTty(session.tty, 'codex');
+    if (pid) return { pid, command:'codex' };
+  }
+  const task = tasks.find(t => t.sessionId === session.id && active.has(t.id));
+  return task ? { task } : null;
+}
+function cancelSessionTasks(sessionId, error) {
+  let changed = false;
+  for (const task of tasks) if (task.sessionId === sessionId && ['running', 'queued', 'cancelling'].includes(task.status) && task.delivery !== 'queue') {
+    Object.assign(task, { status:'cancelled', error, updatedAt:new Date().toISOString() }); changed = true;
+  }
+  if (changed) saveTasks();
+}
+async function endAgent(target) {
+  if (target.task) {
+    updateTask(target.task, { status:'cancelling' });
+    active.get(target.task.id)?.kill('SIGTERM');
+    return { stopped:true, forced:false };
+  }
+  return stopAgent(target.pid, target.command);
+}
 function titleFor(prompt) { return prompt.replace(/\s+/g, ' ').trim().slice(0, 90); }
 function updateTask(task, patch) { Object.assign(task, patch); saveTasks(); }
 
@@ -907,10 +937,25 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok:true });
       }
     }
+    const endMatch = pathname.match(/^\/api\/sessions\/(.+)\/end$/);
+    if (endMatch && req.method === 'POST') {
+      const session = sessions(true).find(s => s.id === decodeURIComponent(endMatch[1]));
+      if (!session) return send(res, 404, { error:'Session not found.' });
+      if (session.harness === 'codex' && !session.tty && session.liveState !== 'history') return send(res, 409, { error:'This Codex session is open in the Codex app. End it there.' });
+      const target = endTarget(session);
+      if (!target) return send(res, 409, { error:'This session is not running anything Shed can end.' });
+      const result = await endAgent(target);
+      cancelSessionTasks(session.id, 'Session ended from Shed.');
+      sessions(true); broadcast('sessions', {});
+      if (!result.stopped) return send(res, 409, { error:`${label[session.harness] || session.harness} did not stop. Close its Terminal window on the Mac.` });
+      return send(res, 200, { ok:true, forced:Boolean(result.forced) });
+    }
     if (pathname.startsWith('/api/sessions/') && req.method === 'GET') {
       const id = decodeURIComponent(pathname.slice('/api/sessions/'.length));
       const session = sessions().find(s => s.id === id);
-      return session ? sendVersioned(req, res, { session: publicSession(session), messages: sessionMessages(session) }) : send(res, 404, { error: 'Session not found.' });
+      // Whether the drawer offers "End session": something Shed can stop is running for it.
+      const canEnd = Boolean(session && session.liveState !== 'history' && (session.tty || session.harness === 'claude' || tasks.some(t => t.sessionId === session.id && active.has(t.id))) && !(session.harness === 'codex' && !session.tty));
+      return session ? sendVersioned(req, res, { session:{ ...publicSession(session), canEnd }, messages: sessionMessages(session) }) : send(res, 404, { error: 'Session not found.' });
     }
     if (pathname === '/api/route' && req.method === 'POST') {
       const input = await body(req);
@@ -947,9 +992,18 @@ const server = http.createServer(async (req, res) => {
     if (pathname.endsWith('/cancel') && pathname.startsWith('/api/tasks/') && req.method === 'POST') {
       const id = pathname.split('/')[3];
       const task = tasks.find(t => t.id === id), child = active.get(id);
-      if (!task || !child) return send(res, 404, { error: 'Running task not found.' });
-      updateTask(task, { status: 'cancelling' }); child.kill('SIGTERM');
-      return send(res, 200, { task });
+      if (task && child) { updateTask(task, { status: 'cancelling' }); child.kill('SIGTERM'); return send(res, 200, { task }); }
+      // A task running in a Terminal window: end the agent in that window.
+      if (task?.delivery === 'terminal' && task.tty && ['running', 'cancelling'].includes(task.status)) {
+        const pid = pidOnTty(task.tty, task.harness);
+        const result = pid ? await stopAgent(pid, task.harness) : { stopped:true };
+        if (!result.stopped) return send(res, 409, { error:`${label[task.harness] || task.harness} did not stop. Close its Terminal window on the Mac.` });
+        updateTask(task, { status:'cancelled', error:'Cancelled from Shed.', updatedAt:new Date().toISOString() });
+        if (task.sessionId) cancelSessionTasks(task.sessionId, 'Session ended from Shed.');
+        sessions(true); broadcast('sessions', {});
+        return send(res, 200, { task });
+      }
+      return send(res, 404, { error: 'Running task not found.' });
     }
     return send(res, 404, { error: 'Not found.' });
   } catch (error) { return send(res, 400, { error: error.message || 'Request failed.' }); }

@@ -591,3 +591,9 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 .pro-name input { flex:1; min-width:0; }
 .pro-name span { font-family:var(--mono); color:var(--muted); font-size:13px; white-space:nowrap; }
 .pro-form .send-button { justify-self:start; }
+
+/* End session: a quiet danger button beside the drawer's close button */
+.drawer-header .end-session { margin-left:auto; margin-right:10px; font:600 12px var(--sans); color:#b4432c; background:transparent; border:1px solid currentColor; border-radius:8px; padding:7px 11px; min-height:36px; cursor:pointer; white-space:nowrap; }
+.drawer-header .end-session:hover { background:#b4432c; color:#fff; }
+.drawer-header .end-session:disabled { opacity:.6; cursor:wait; }
+.drawer-header .end-session.hidden { display:none; }

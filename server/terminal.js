@@ -194,3 +194,28 @@ end run`, [command]);
   if (!/^\/dev\/ttys\d+$/.test(tty)) throw new Error('Terminal did not open a new window.');
   return tty;
 }
+
+// Ends an agent process (and the tool commands it is running) without touching the shell around it.
+// The PID must still belong to `command` (PIDs get reused). In a Terminal tab the agent leads its own foreground
+// process group, so the whole group is signalled; otherwise only the agent itself. SIGTERM first, SIGKILL after a grace period.
+export function processInfo(pid) {
+  const result = spawnSync('/bin/ps', ['-o', 'pgid=,comm=', '-p', String(pid)], { encoding:'utf8', timeout:2000 });
+  const match = (result.stdout || '').trim().match(/^(\d+)\s+(.+)$/);
+  return match ? { pgid:Number(match[1]), command:path.basename(match[2]) } : null;
+}
+export async function stopAgent(pid, command, { graceMs = 5000 } = {}) {
+  const names = Array.isArray(command) ? command : [command];
+  const owned = () => { const info = processInfo(pid); return info && names.includes(info.command) ? info : null; };
+  const info = owned();
+  if (!info) return { stopped:false, reason:'not-running' };
+  const target = info.pgid === pid ? -pid : pid;
+  const signal = name => { try { process.kill(target, name); } catch (error) { if (error.code !== 'ESRCH') throw error; } };
+  signal('SIGTERM');
+  for (let waited = 0; waited < graceMs; waited += 250) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    if (!owned()) return { stopped:true, forced:false };
+  }
+  if (owned()) signal('SIGKILL');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  return { stopped:!owned(), forced:true };
+}
