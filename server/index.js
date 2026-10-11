@@ -420,7 +420,7 @@ function sendVersioned(req, res, value) {
 }
 // Lists only need what a row shows; the full task (reply text and all) loads when one is opened.
 const taskSummary = t => ({ id:t.id, title:t.title, status:t.status, harness:t.harness, sessionId:t.sessionId, cwd:t.cwd, createdAt:t.createdAt, updatedAt:t.updatedAt, delivery:t.delivery, tty:t.tty, waitingOn:t.waitingOn, handoffFrom:t.handoffFrom, returnedTo:t.returnedTo, model:t.model, modelSource:t.modelSource, routeSource:t.routeSource, error:(t.error || '').slice(0, 300) });
-const publicTask = ({ agentPrompt, transcriptFile, claudeSessionId, nativeSessionId, submitRetries, lastSubmitRetry, waitNotified, ...rest }) => rest;
+const publicTask = ({ agentPrompt, transcriptFile, transcriptOffset, claudeSessionId, nativeSessionId, submitRetries, lastSubmitRetry, waitNotified, ...rest }) => rest;
 function send(res, status, value, headers = {}) {
   const data = JSON.stringify(value);
   res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
@@ -575,6 +575,7 @@ async function endAgent(target) {
   }
   return stopAgent(target.pid, target.command);
 }
+function transcriptSize(file) { try { return fs.statSync(file).size; } catch { return 0; } }
 function titleFor(prompt) { return prompt.replace(/\s+/g, ' ').trim().slice(0, 90); }
 function updateTask(task, patch) { Object.assign(task, patch); saveTasks(); }
 
@@ -624,6 +625,8 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       // Never type a message while the agent shows a question: the Return would pick whatever option is highlighted
       // (for example "No, exit" on Claude's folder-trust question).
       if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`${label} is waiting for an answer in its Terminal. Answer it from the Terminal tab first, then send your message again.`);
+      // Where the transcript ends now: Shed looks for the message (and the reply) from here on.
+      task.transcriptOffset = transcriptSize(session.file);
       await typeIntoTerminalAsync(session.tty, agentPrompt, { prompt:true, agent:task.harness });
       Object.assign(task, { tty:session.tty, transcriptFile:session.file, [task.harness === 'codex' ? 'nativeSessionId' : 'claudeSessionId']:session.nativeId, permissions:'terminal', output:`Typed into the open Terminal tab. Waiting for ${label} to pick it up.` });
     } else if (task.harness === 'codex') {
@@ -640,6 +643,7 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       fs.mkdirSync(promptDir, { recursive:true, mode:0o700 });
       const promptFile = path.join(promptDir, `${task.id}.txt`);
       fs.writeFileSync(promptFile, agentPrompt, { mode:0o600 });
+      if (session) task.transcriptOffset = transcriptSize(session.file);
       const argv = ['claude', ...(session ? ['--resume', session.nativeId] : []), ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-skip-permissions'] : [])];
       const tty = await openTerminalAsync(cwd, argv, promptFile);
       Object.assign(task, { tty, permissions:skipPermissions ? 'skip' : 'default', output:`Opened a new Terminal window on the Mac (${tty.replace('/dev/', '')}).${skipPermissions ? '' : ' Claude will ask there before using tools; answer from the Terminal view.'}` });

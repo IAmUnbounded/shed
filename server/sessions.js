@@ -245,25 +245,51 @@ export function publicSession(session) {
 }
 
 // A message typed into a Claude terminal shows up in its transcript; the reply is every assistant message after it.
+// The transcript is read forward from where it ended when the message was typed (task.transcriptOffset), a little
+// more each time. Reading only its tail is not enough: a reply that looks at images or video frames writes megabytes
+// of image data after the message, which would push the message out of any fixed-size tail.
+const scans = new Map(); // task id -> { file, offset, rest, foundAt, output }
+const CHUNK = 8 * 1024 * 1024;
 export function claudeTerminalProgress(task) {
   if (!task.transcriptFile || !fs.existsSync(task.transcriptFile)) return { found:false, output:'' };
   const expected = clean(task.agentPrompt || task.prompt, 20000).slice(0, 80);
-  let foundAt = null;
-  const output = [];
-  for (const row of jsonLines(sliceFile(task.transcriptFile, 4 * 1024 * 1024, true))) {
-    if (row.isSidechain) continue;
-    if (!foundAt) {
-      if (row.type !== 'user' || Date.parse(row.timestamp || '') < Date.parse(task.createdAt) - 5000) continue;
-      const raw = contentText(row.message?.content);
-      if (isUsefulPrompt(raw) && clean(raw, 20000).startsWith(expected)) foundAt = Date.parse(row.timestamp);
-      continue;
-    }
-    if (row.type === 'assistant') {
-      const message = displayText(contentText(row.message?.content));
-      if (message) output.push(message);
-    }
+  const key = task.id || `${task.transcriptFile}|${task.createdAt}|${expected}`;
+  let scan = scans.get(key);
+  if (!scan || scan.file !== task.transcriptFile) {
+    scan = { file:task.transcriptFile, offset:Math.max(0, Number(task.transcriptOffset) || 0), rest:Buffer.alloc(0), foundAt:null, output:[] };
+    scans.set(key, scan);
+    if (scans.size > 100) scans.delete(scans.keys().next().value);
   }
-  return { found:Boolean(foundAt), foundAt, output:output.join('\n\n') };
+  const fd = fs.openSync(scan.file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size < scan.offset) Object.assign(scan, { offset:0, rest:Buffer.alloc(0), foundAt:null, output:[] }); // rewritten
+    while (scan.offset < size) {
+      const buffer = Buffer.alloc(Math.min(CHUNK, size - scan.offset));
+      const read = fs.readSync(fd, buffer, 0, buffer.length, scan.offset);
+      if (!read) break;
+      scan.offset += read;
+      // Only whole lines are parsed; a line still being written waits for the next call.
+      const data = Buffer.concat([scan.rest, buffer.subarray(0, read)]);
+      const end = data.lastIndexOf(10);
+      scan.rest = end < 0 ? data : data.subarray(end + 1);
+      if (end < 0) continue;
+      for (const row of jsonLines(data.subarray(0, end).toString('utf8'))) {
+        if (row.isSidechain) continue;
+        if (!scan.foundAt) {
+          if (row.type !== 'user' || Date.parse(row.timestamp || '') < Date.parse(task.createdAt) - 5000) continue;
+          const raw = contentText(row.message?.content);
+          if (isUsefulPrompt(raw) && clean(raw, 20000).startsWith(expected)) scan.foundAt = Date.parse(row.timestamp);
+          continue;
+        }
+        if (row.type === 'assistant') {
+          const message = displayText(contentText(row.message?.content));
+          if (message) scan.output.push(message);
+        }
+      }
+    }
+  } finally { fs.closeSync(fd); }
+  return { found:Boolean(scan.foundAt), foundAt:scan.foundAt, output:scan.output.join('\n\n') };
 }
 
 // Codex writes transcripts through its background service, so a session started in a new Terminal window is found
