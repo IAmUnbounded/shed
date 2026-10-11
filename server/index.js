@@ -17,6 +17,7 @@ import { initPush, pushPublicKey, subscribe, unsubscribe, notify, isSubscribed, 
 import { listArtifacts, resolveInside, sendFile } from './files.js';
 import { proStore } from './pro.js';
 import { interruptCodexThread } from './codex-app.js';
+import { uploadStore, attachmentNote, UPLOAD_ID } from './uploads.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
@@ -41,6 +42,7 @@ let tasks = loadTasks();
 let settings = loadSettings();
 initPush(dataDir);
 const pro = proStore(dataDir, { port });
+const uploads = uploadStore(dataDir);
 const attempts = new Map();
 
 function getToken() {
@@ -529,7 +531,7 @@ async function returnToOrigin(task) {
   if (!task.handoffFrom || task.returnedTo || task.returnedAt) return;
   task.returnedAt = new Date().toISOString(); saveTasks();
   try {
-    const { input, route, cwd, model } = await planTask({ prompt:task.prompt, sessionId:task.handoffFrom, followup:'stay', harness:'auto', model:'', newSession:false });
+    const { input, route, cwd, model } = await planTask({ prompt:task.prompt, attachmentPaths:task.attachments || [], sessionId:task.handoffFrom, followup:'stay', harness:'auto', model:'', newSession:false });
     const back = startTask(input, route, model, cwd);
     Object.assign(task, { returnedTo:back.id, error:`${task.error} Shed sent your message back to the original ${back.harness} session instead.`.trim() }); saveTasks();
     notify({ title:`Handoff to ${label[task.harness] || task.harness} did not start`, body:`Your message went back to the original ${label[back.harness] || back.harness} session.`, url:`/?task=${encodeURIComponent(back.id)}`, tag:`task-${task.id}` }).catch(() => {});
@@ -579,7 +581,7 @@ function updateTask(task, patch) { Object.assign(task, patch); saveTasks(); }
 function queueCodexTask(task, session) {
   Object.assign(task, { status:'queued', delivery:'queue', transcriptFile:session.file, model:'', modelReason:'The open Codex session keeps its current model.', modelSource:'session', error:'', output:'Waiting for the open Codex session to accept this message.', updatedAt:new Date().toISOString() });
   saveTasks();
-  const child = spawn('codex', ['queue', '--thread', session.nativeId, '--message', task.prompt], { cwd:task.cwd, env:{ ...process.env, NO_COLOR:'1' }, stdio:['ignore', 'pipe', 'pipe'] });
+  const child = spawn('codex', ['queue', '--thread', session.nativeId, '--message', task.agentPrompt || task.prompt], { cwd:task.cwd, env:{ ...process.env, NO_COLOR:'1' }, stdio:['ignore', 'pipe', 'pipe'] });
   active.set(task.id, child);
   let result = '';
   child.stdout.on('data', chunk => { result += chunk.toString(); });
@@ -650,12 +652,15 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
 }
 
 function startTask(input, route, modelDecision, requestedCwd = '') {
-  const agentPrompt = (input.agentPrompt || input.prompt).trim();
+  let agentPrompt = (input.agentPrompt || input.prompt).trim();
   const harness = route.session?.harness || route.harness;
   if (!available[harness]) throw new Error(`${harness} CLI is not installed on this desktop.`);
   if (harness === 'gemini' && route.session && !route.session.cwd && !requestedCwd) throw new Error('This Gemini record does not include its original project path, so it cannot be resumed safely.');
   const cwd = route.session?.cwd && fs.existsSync(route.session.cwd) ? route.session.cwd :
     requestedCwd && fs.existsSync(requestedCwd) && fs.statSync(requestedCwd).isDirectory() ? requestedCwd : root;
+  // Attached files move into the project, and the agent is told where they are.
+  const attachments = [...(input.attachmentPaths || []), ...uploads.place(input.attachments || [], cwd === root ? '' : cwd)];
+  agentPrompt += attachmentNote(attachments);
   const task = {
     id: crypto.randomUUID(), prompt: input.prompt.trim(), title: titleFor(input.prompt),
     status: 'running', harness, sessionId: route.session?.id || null,
@@ -663,6 +668,7 @@ function startTask(input, route, modelDecision, requestedCwd = '') {
     routeReason: route.reason, routeSource: route.source || 'local', routeFallbackReason:route.fallbackReason || '',
     model:modelDecision.model, modelReason:modelDecision.reason, modelSource:modelDecision.source, modelFallbackReason:modelDecision.fallbackReason || '', cwd, output: '', error: '',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    ...(attachments.length ? { attachments, agentPrompt } : {}),
   };
   tasks.unshift(task); saveTasks();
   // Codex open in the desktop app (no terminal) takes queued messages; everything else runs in a visible Terminal.
@@ -979,8 +985,20 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { route: { harness:route.session?.harness || route.harness, handoff:Boolean(route.handoff), reason:route.reason, fallbackReason:route.fallbackReason || '', confidence:route.score ?? null, source:route.source, model:model.model, modelSource:model.source, modelReason:model.reason } });
     }
     if (pathname === '/api/tasks' && req.method === 'GET') { refreshQueuedTasks(); return sendVersioned(req, res, { tasks: tasks.slice(0, 60).map(taskSummary) }); }
+    // Attachments: the file is the request body; its name comes in X-File-Name (URI-encoded).
+    if (pathname === '/api/uploads' && req.method === 'POST') {
+      let name = '';
+      try { name = decodeURIComponent(String(req.headers['x-file-name'] || '')); } catch { name = ''; }
+      try { return send(res, 201, await uploads.stage(req, name)); }
+      catch (error) { return send(res, error.status || 400, { error:error.message }); }
+    }
+    const uploadMatch = pathname.match(/^\/api\/uploads\/([\w-]+)$/);
+    if (uploadMatch && req.method === 'DELETE') { uploads.discard(uploadMatch[1]); return send(res, 200, { ok:true }); }
     if (pathname === '/api/tasks' && req.method === 'POST') {
       let input = await body(req);
+      const attachmentIds = Array.isArray(input.attachments) ? input.attachments.filter(id => typeof id === 'string' && UPLOAD_ID.test(id)).slice(0, 10) : [];
+      input = { ...input, attachments:attachmentIds, attachmentPaths:[] };
+      if (attachmentIds.length && typeof input.prompt === 'string' && !input.prompt.trim()) input.prompt = attachmentIds.length > 1 ? 'Take a look at these files.' : 'Take a look at this file.';
       if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 20000) return send(res, 400, { error: 'Prompt must be between 1 and 20,000 characters.' });
       let { input:planned, route, cwd, model } = await planTask(input);
       input = planned;

@@ -597,3 +597,28 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 .drawer-header .end-session:hover { background:#b4432c; color:#fff; }
 .drawer-header .end-session:disabled { opacity:.6; cursor:wait; }
 .drawer-header .end-session.hidden { display:none; }
+
+/* Attachments: a paperclip in each composer, uploaded files as chips above the text */
+.attach-button { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--muted); font: 500 13px var(--sans); cursor: pointer; }
+.attach-button:hover { color: var(--ink); border-color: var(--accent); }
+.drawer-actions .attach-button { width: 40px; padding: 0; justify-content: center; }
+.phone-message .phone-row .attach-button { width: 36px; height: 36px; padding: 0; justify-content: center; border-radius: 50%; background: var(--sidebar); color: var(--ink); border: 1px solid var(--line); font-size: 16px; }
+.attach-tray { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.attach-tray.hidden { display: none; }
+.attach-chip { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-height: 36px; padding: 4px 4px 4px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font: 500 13px var(--sans); color: var(--ink); }
+.attach-chip .attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.attach-chip small { color: var(--quiet); font: 12px var(--mono); white-space: nowrap; }
+.attach-chip.uploading small { color: var(--accent); }
+.attach-chip.failed { border-color: #c4553a; }
+.attach-chip.failed small { color: #b4432c; }
+.attach-chip button { flex: none; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--quiet); font-size: 17px; line-height: 1; cursor: pointer; }
+.phone-message .attach-chip button { width: 28px; height: 28px; background: transparent; color: var(--quiet); border-radius: 6px; font-size: 17px; }
+.attach-chip button:hover { background: var(--accent-soft); color: var(--ink); }
+.phone-message .attach-tray { margin: 0; }
+.attached-paths { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.attached-paths li { display: grid; font-size: 13px; }
+.attached-paths small { font: 11px var(--mono); color: var(--quiet); overflow-wrap: anywhere; }
+.composer-card .attach-tray { margin: 0; padding: 0 22px 14px; }
+.composer-selects .attach-button { align-self: center; justify-self: start; width: auto; height: 32px; }
+.drawer-composer .drawer-actions .attach-button { background: var(--surface); color: var(--muted); border: 1px solid var(--line); min-width: 0; }
+.drawer-composer .drawer-actions .attach-button:hover { color: var(--ink); border-color: var(--accent); }
