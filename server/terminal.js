@@ -199,16 +199,25 @@ end run`, [command]);
 // The PID must still belong to `command` (PIDs get reused). In a Terminal tab the agent leads its own foreground
 // process group, so the whole group is signalled; otherwise only the agent itself. SIGTERM first, SIGKILL after a grace period.
 export function processInfo(pid) {
-  const result = spawnSync('/bin/ps', ['-o', 'pgid=,comm=', '-p', String(pid)], { encoding:'utf8', timeout:2000 });
-  const match = (result.stdout || '').trim().match(/^(\d+)\s+(.+)$/);
-  return match ? { pgid:Number(match[1]), command:path.basename(match[2]) } : null;
+  const result = spawnSync('/bin/ps', ['-o', 'pgid=,tpgid=,comm=', '-p', String(pid)], { encoding:'utf8', timeout:2000 });
+  const match = (result.stdout || '').trim().match(/^(\d+)\s+(-?\d+)\s+(.+)$/);
+  return match ? { pgid:Number(match[1]), tpgid:Number(match[2]), command:path.basename(match[3]) } : null;
+}
+const SHELLS = new Set(['login', 'zsh', '-zsh', 'bash', '-bash', 'sh', '-sh', 'fish', '-fish', 'tmux', 'screen']);
+// The process group to signal: the agent's own, or the foreground job it belongs to when a launcher started it
+// (npm's `codex` is a node wrapper leading the group). Never a group led by a shell, which would close the tab.
+function groupFor(pid, info) {
+  if (info.pgid === pid) return -pid;
+  if (info.pgid !== info.tpgid || info.pgid <= 1) return pid;
+  const leader = processInfo(info.pgid);
+  return leader && !SHELLS.has(leader.command) ? -info.pgid : pid;
 }
 export async function stopAgent(pid, command, { graceMs = 5000 } = {}) {
   const names = Array.isArray(command) ? command : [command];
   const owned = () => { const info = processInfo(pid); return info && names.includes(info.command) ? info : null; };
   const info = owned();
   if (!info) return { stopped:false, reason:'not-running' };
-  const target = info.pgid === pid ? -pid : pid;
+  const target = groupFor(pid, info);
   const signal = name => { try { process.kill(target, name); } catch (error) { if (error.code !== 'ESRCH') throw error; } };
   signal('SIGTERM');
   for (let waited = 0; waited < graceMs; waited += 250) {

@@ -594,6 +594,7 @@ async function openSession(id, silent = false) {
     state.selectedSession = session;
     state.selectedTask = null;
     $('#end-session').classList.toggle('hidden', !session.canEnd);
+    $('#end-session').textContent = session.harness === 'codex' && !session.tty ? 'Stop Codex' : 'End session';
     if (!silent) { state.login = null; $('#detail-drawer').classList.remove('login-mode'); }
     renderModelChoices();
     const status = session.liveState === 'history' ? 'HISTORY' : session.liveState === 'working' ? 'WORKING NOW' : session.liveState === 'asking' ? 'NEEDS YOUR OK' : 'OPEN ON DESKTOP';
@@ -730,15 +731,20 @@ $('#terminal-view').addEventListener('click', () => { if (!getSelection().toStri
 // Ending a session stops its agent (and whatever command it is running). The Terminal window stays open on the Mac.
 $('#end-session').addEventListener('click', async () => {
   const session = state.selectedSession;
-  if (!session || !confirm(`End this ${harnessNames[session.harness] || session.harness} session? The agent stops at once, including any command it is running. You can resume it later.`)) return;
+  const inCodexApp = session?.harness === 'codex' && !session.tty;
+  if (!session || !confirm(inCodexApp
+    ? 'Stop what Codex is doing in this session? Its current turn ends at once. The session stays open in the Codex app.'
+    : `End this ${harnessNames[session.harness] || session.harness} session? The agent stops at once, including any command it is running. You can resume it later.`)) return;
   const button = $('#end-session'); button.disabled = true; button.textContent = 'Ending…';
   try {
     const result = await api(`/api/sessions/${encodeURIComponent(session.id)}/end`, { method:'POST' });
-    showFeedback(result.forced ? 'The session did not exit on its own, so Shed force-stopped it.' : 'Session ended.');
-    button.classList.add('hidden');
+    showFeedback(result.mode === 'interrupted' ? 'Codex stopped its current turn. The session is still open in the Codex app.'
+      : result.mode === 'idle' ? 'Codex was not working on anything, so there was nothing to stop.'
+      : result.forced ? 'The session did not exit on its own, so Shed force-stopped it.' : 'Session ended.');
+    if (!inCodexApp) button.classList.add('hidden');
     await refresh(); openSession(session.id, true);
   } catch (error) { showFeedback(error.message); }
-  finally { button.disabled = false; button.textContent = 'End session'; }
+  finally { button.disabled = false; button.textContent = inCodexApp ? 'Stop Codex' : 'End session'; }
 });
 $('#terminal-controls').addEventListener('click', async e => {
   const button = e.target.closest('[data-key]'), target = terminalTarget();

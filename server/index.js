@@ -16,6 +16,7 @@ import { harnessHealth, refreshHarnessHealth } from './health.js';
 import { initPush, pushPublicKey, subscribe, unsubscribe, notify, isSubscribed, pushCount } from './notify.js';
 import { listArtifacts, resolveInside, sendFile } from './files.js';
 import { proStore } from './pro.js';
+import { interruptCodexThread } from './codex-app.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
@@ -548,6 +549,8 @@ function endTarget(session) {
     const pid = pidOnTty(session.tty, 'codex');
     if (pid) return { pid, command:'codex' };
   }
+  // Open in the Codex desktop app: no process of its own, so Shed asks the Codex app to stop the running turn.
+  if (session.harness === 'codex' && !session.tty) return { codexThread:session.nativeId };
   const task = tasks.find(t => t.sessionId === session.id && active.has(t.id));
   return task ? { task } : null;
 }
@@ -559,6 +562,10 @@ function cancelSessionTasks(sessionId, error) {
   if (changed) saveTasks();
 }
 async function endAgent(target) {
+  if (target.codexThread) {
+    const { interrupted } = await interruptCodexThread(target.codexThread);
+    return { stopped:true, forced:false, mode:interrupted ? 'interrupted' : 'idle' };
+  }
   if (target.task) {
     updateTask(target.task, { status:'cancelling' });
     active.get(target.task.id)?.kill('SIGTERM');
@@ -941,20 +948,19 @@ const server = http.createServer(async (req, res) => {
     if (endMatch && req.method === 'POST') {
       const session = sessions(true).find(s => s.id === decodeURIComponent(endMatch[1]));
       if (!session) return send(res, 404, { error:'Session not found.' });
-      if (session.harness === 'codex' && !session.tty && session.liveState !== 'history') return send(res, 409, { error:'This Codex session is open in the Codex app. End it there.' });
       const target = endTarget(session);
       if (!target) return send(res, 409, { error:'This session is not running anything Shed can end.' });
       const result = await endAgent(target);
       cancelSessionTasks(session.id, 'Session ended from Shed.');
       sessions(true); broadcast('sessions', {});
       if (!result.stopped) return send(res, 409, { error:`${label[session.harness] || session.harness} did not stop. Close its Terminal window on the Mac.` });
-      return send(res, 200, { ok:true, forced:Boolean(result.forced) });
+      return send(res, 200, { ok:true, forced:Boolean(result.forced), mode:result.mode || 'ended' });
     }
     if (pathname.startsWith('/api/sessions/') && req.method === 'GET') {
       const id = decodeURIComponent(pathname.slice('/api/sessions/'.length));
       const session = sessions().find(s => s.id === id);
       // Whether the drawer offers "End session": something Shed can stop is running for it.
-      const canEnd = Boolean(session && session.liveState !== 'history' && (session.tty || session.harness === 'claude' || tasks.some(t => t.sessionId === session.id && active.has(t.id))) && !(session.harness === 'codex' && !session.tty));
+      const canEnd = Boolean(session && session.liveState !== 'history' && (session.tty || ['claude', 'codex'].includes(session.harness) || tasks.some(t => t.sessionId === session.id && active.has(t.id))));
       return session ? sendVersioned(req, res, { session:{ ...publicSession(session), canEnd }, messages: sessionMessages(session) }) : send(res, 404, { error: 'Session not found.' });
     }
     if (pathname === '/api/route' && req.method === 'POST') {

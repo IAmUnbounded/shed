@@ -44,3 +44,17 @@ test('never signals a process that is not the named agent', async () => {
   assert.ok(alive(child.pid));
   process.kill(-child.pid, 'SIGKILL');
 });
+
+test('a launcher-led job (like npm codex) is ended as a whole', async () => {
+  // node (the launcher, "node") leads the group; the agent ("claude" here) is its child, with a tool command of its own.
+  const launcher = spawn(process.execPath, ['-e', `const c = require('child_process').spawn(${JSON.stringify(fakeClaude)}, ['-e', "const t = require('child_process').spawn('sleep', ['300'], { stdio:'ignore' }); console.log(process.pid + ' ' + t.pid); setInterval(() => {}, 1000)"], { stdio:['ignore', 'inherit', 'ignore'] }); setInterval(() => {}, 1000)`], { detached:true, stdio:['ignore', 'pipe', 'ignore'] });
+  launcher.unref();
+  const [agentPid, toolPid] = (await firstLine(launcher)).split(' ').map(Number);
+  // Not a terminal's foreground job, so only the agent is signalled; its tool keeps running until the group goes.
+  const result = await stopAgent(agentPid, 'claude');
+  assert.equal(result.stopped, true);
+  assert.equal(alive(agentPid), false);
+  process.kill(-launcher.pid, 'SIGKILL');
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(alive(toolPid), false);
+});
