@@ -18,6 +18,7 @@ import { listArtifacts, resolveInside, sendFile } from './files.js';
 import { proStore } from './pro.js';
 import { interruptCodexThread } from './codex-app.js';
 import { uploadStore, attachmentNote, UPLOAD_ID } from './uploads.js';
+import { parseMenu, keysToChoose } from './menu.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
@@ -605,6 +606,17 @@ function queueCodexTask(task, session) {
 const CONTROL_KEYS = ['\u0003', '\u001b[Z', '1', '2', '3', ''];
 const loginCommands = { codex:['codex', 'login'], claude:['claude', 'auth', 'login'], gemini:['gemini'], opencode:['opencode', 'auth', 'login'], pi:['pi'] };
 const loginTerminals = new Map();
+// A terminal reading for the phone: the screen text plus, when the agent is asking, the options it offers.
+function terminalReading(tty, text) { return { tty, text, menu:parseMenu(text.split('\n').slice(-40).join('\n')) }; }
+// Choosing an option: the screen is read again and the option must still be there with the same text, so a tap made
+// while the question changed cannot land on something else. The pointer moves with arrow keys, then Return chooses.
+async function chooseOption(tty, input) {
+  const index = Number(input.option);
+  const menu = parseMenu(((await readTerminalAsync(tty, 40)) || '').split('\n').slice(-40).join('\n'));
+  if (!menu || !Number.isInteger(index) || menu.options[index] !== input.label) return { status:409, error:'The question on the Mac has changed. Look at the terminal again, then choose.' };
+  await typeIntoTerminalAsync(tty, keysToChoose(menu, index));
+  return { status:200 };
+}
 
 // Claude runs in a visible Terminal: typed into the tab that already holds the session, or a new window that resumes it.
 const QUESTION_ON_SCREEN = /Do you want to|Esc to cancel|Enter to confirm|❯\s*1\.|›\s*1\.\s|Would you like to|Press enter to confirm|trust this folder/i;
@@ -906,12 +918,13 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') {
         const text = await readTerminalAsync(tty);
         if (text === null) { loginTerminals.delete(name); return send(res, 404, { error:'The sign-in window was closed.' }); }
-        return sendVersioned(req, res, { tty, text });
+        return sendVersioned(req, res, terminalReading(tty, text));
       }
       if (req.method === 'POST') {
         const input = await body(req);
-        if (typeof input.text !== 'string' || input.text.length > 4000) return send(res, 400, { error:'Send up to 4,000 characters.' });
         if (!agentInForeground(tty, [loginCommands[name][0], 'node'])) return send(res, 409, { error:'The sign-in has finished in that window, so Shed will not type into it.' });
+        if (input.option !== undefined) { const result = await chooseOption(tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
+        if (typeof input.text !== 'string' || input.text.length > 4000) return send(res, 400, { error:'Send up to 4,000 characters.' });
         await typeIntoTerminalAsync(tty, input.text);
         return send(res, 200, { ok:true });
       }
@@ -923,12 +936,13 @@ const server = http.createServer(async (req, res) => {
       if (!task?.tty) return send(res, 404, { error:'This task has no Terminal window.' });
       if (req.method === 'GET') {
         const text = await readTerminalAsync(task.tty);
-        return text === null ? send(res, 404, { error:'That Terminal window is closed.' }) : sendVersioned(req, res, { tty:task.tty, text });
+        return text === null ? send(res, 404, { error:'That Terminal window is closed.' }) : sendVersioned(req, res, terminalReading(task.tty, text));
       }
       if (req.method === 'POST') {
         const input = await body(req);
-        if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here.' });
         if (!agentInForeground(task.tty, [task.harness, 'node'])) return send(res, 409, { error:`${task.harness} is no longer running in that Terminal window.` });
+        if (input.option !== undefined) { const result = await chooseOption(task.tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
+        if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here.' });
         await typeIntoTerminalAsync(task.tty, input.text);
         return send(res, 200, { ok:true });
       }
@@ -943,13 +957,14 @@ const server = http.createServer(async (req, res) => {
       if (!session.tty) return send(res, 404, { error:'This session is not open in a Terminal tab.' });
       if (req.method === 'GET') {
         const text = await readTerminalAsync(session.tty);
-        return text === null ? send(res, 404, { error:'That Terminal tab is no longer open.' }) : sendVersioned(req, res, { tty:session.tty, text });
+        return text === null ? send(res, 404, { error:'That Terminal tab is no longer open.' }) : sendVersioned(req, res, terminalReading(session.tty, text));
       }
       if (req.method === 'POST') {
         const input = await body(req);
-        // Only the on-screen control keys, and only while the agent is the foreground program: never free text into a shell.
-        if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here. Send messages from the message box.' });
+        // Only the on-screen control keys or a listed option, and only while the agent is the foreground program: never free text into a shell.
         if (!agentInForeground(session.tty, session.harness)) return send(res, 409, { error:`${session.harness} is no longer running in that Terminal tab.` });
+        if (input.option !== undefined) { const result = await chooseOption(session.tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
+        if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here. Send messages from the message box.' });
         await typeIntoTerminalAsync(session.tty, input.text);
         return send(res, 200, { ok:true });
       }

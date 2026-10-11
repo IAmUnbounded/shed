@@ -327,10 +327,17 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 @media (max-width: 700px) { .terminal-line textarea { font-size: 16px; } }
 
 .terminal-controls { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-top: 1px solid #3a3833; overflow-x: auto; }
-.terminal-controls .answer-keys { display: flex; gap: 6px; }
 .terminal-controls button { flex: none; border: 1px solid #55514a; background: #2a2925; color: #f3f1ea; border-radius: 7px; padding: 7px 12px; font: 600 12px var(--mono); }
 .terminal-controls button:hover { border-color: var(--accent); }
-.terminal-controls.asking .answer-keys button { background: var(--accent); border-color: var(--accent); color: #fff; }
+.terminal-controls button { min-height: 40px; }
+
+/* The agent's question as tappable answers, in its own words, above the control keys */
+.terminal-choices { display: grid; gap: 6px; padding: 10px 12px 0; border-top: 1px solid #3a3833; max-height: 45vh; overflow-y: auto; }
+.terminal-choices.hidden { display: none; }
+.terminal-choices button { display: block; width: 100%; min-height: 44px; text-align: left; border: 1px solid #55514a; background: #2a2925; color: #f3f1ea; border-radius: 9px; padding: 10px 12px; font: 500 14px/1.35 var(--sans); overflow-wrap: anywhere; cursor: pointer; }
+.terminal-choices button.current { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.terminal-choices button:hover, .terminal-choices button.sending { background: var(--accent); border-color: var(--accent); color: #fff; }
+.terminal-choices button:disabled:not(.sending) { opacity: .55; }
 
 .harness-start { margin-left: 8px; width: 22px; height: 22px; flex: none; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); font: 500 15px/1 var(--sans); padding: 0; }
 .harness-start:hover { border-color: var(--accent); color: var(--accent); }

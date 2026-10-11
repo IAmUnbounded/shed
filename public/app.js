@@ -540,15 +540,16 @@ async function loadTerminal(reset = false) {
   if (document.hidden) return;
   const target = terminalTarget(), view = $('#terminal-view'), scroller = $('#terminal-scroll');
   if (!target || state.pane !== 'terminal' || $('#detail-drawer').classList.contains('hidden')) return;
-  if (reset) { view.textContent = 'Reading the terminal…'; $('#terminal-controls').classList.remove('asking'); }
+  if (reset) { view.textContent = 'Reading the terminal…'; $('#terminal-controls').classList.remove('asking'); renderChoices(null); }
   if (!state.login) $('#terminal-caption').textContent = `Live · ${target.tty.replace("/dev/", "")} on the Mac · updates every 2s`;
   try {
     const data = await api(`${target.url}?v=${reset ? '' : state.terminalV?.[target.key] || ''}`);
     if (terminalTarget()?.key !== target.key || data.same) return;
     state.terminalV = { [target.key]:data.v };
-    const { text } = data;
+    const { text, menu } = data;
     const screen = text.split('\n').slice(-20).join('\n');
-    $('#terminal-controls').classList.toggle('asking', /Esc to cancel|Enter to confirm|❯\s*1\.|Would you like to|Press enter to confirm|›\s*1\.\s/i.test(screen));
+    $('#terminal-controls').classList.toggle('asking', Boolean(menu) || /Esc to cancel|Enter to confirm|❯\s*1\.|Would you like to|Press enter to confirm|›\s*1\.\s/i.test(screen));
+    renderChoices(menu);
     const atBottom = reset || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
     // A wide desktop drawer shows the terminal exactly as laid out; a phone gets the reflowed version.
     view.textContent = wideTerminal.matches ? text.split('\n').map(line => line.replace(/\s+$/, '')).join('\n').replace(/\n{3,}/g, '\n\n') : tidyTerminal(text);
@@ -709,6 +710,28 @@ async function previewFollowup() {
 $$('#drawer-tabs button').forEach(button => button.addEventListener('click', () => showPane(button.dataset.pane)));
 setInterval(() => loadTerminal(), 2000);
 // Typing on the terminal's own prompt line sends a tracked follow-up into that same terminal (Shift+Enter for a new line).
+// The agent's question as buttons with its own wording. A tap sends the option and its text; the Mac checks the
+// question is still the same, moves the pointer there with arrow keys and presses Return.
+function renderChoices(menu) {
+  const box = $('#terminal-choices');
+  box.classList.toggle('hidden', !menu);
+  if (!menu) { box.innerHTML = ''; box.dataset.key = ''; return; }
+  const key = JSON.stringify(menu);
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = menu.options.map((label, i) => `<button type="button" data-option="${i}" class="${i === menu.current ? 'current' : ''}">${escapeHtml(label.replace(/^\d+\.\s+/, ''))}</button>`).join('');
+  box._menu = menu;
+}
+$('#terminal-choices').addEventListener('click', async e => {
+  const button = e.target.closest('[data-option]'), target = terminalTarget(), menu = $('#terminal-choices')._menu;
+  if (!button || !target || !menu) return;
+  const index = Number(button.dataset.option);
+  $$('#terminal-choices button').forEach(b => { b.disabled = true; });
+  button.classList.add('sending');
+  try { await api(target.url, { method:'POST', body:JSON.stringify({ option:index, label:menu.options[index] }) }); }
+  catch (error) { showFeedback(error.message); }
+  finally { setTimeout(() => { $$('#terminal-choices button').forEach(b => { b.disabled = false; b.classList.remove('sending'); }); loadTerminal(); }, 700); }
+});
 async function sendTerminalLine() {
   const box = $('#terminal-prompt'), target = terminalTarget(), prompt = box.value;
   if (!target || !prompt.trim() || box.disabled) return;
@@ -716,7 +739,12 @@ async function sendTerminalLine() {
   try {
     // A session line is a tracked follow-up; a sign-in window just gets the text typed in.
     if (state.login) await api(target.url, { method:'POST', body:JSON.stringify({ text:prompt }) });
-    else await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, sessionId:state.selectedSession.id, followup:'stay', harness:'auto', model:'', newSession:false }) });
+    else {
+      // In a new session's own view the session may not be known yet (for example while it asks to trust the folder).
+      const sessionId = state.selectedSession?.id || state.tasks.find(t => t.id === state.selectedTask)?.sessionId;
+      if (!sessionId) throw new Error($('#terminal-choices').classList.contains('hidden') ? 'This session is still starting. Try again in a moment.' : 'Answer the question above first.');
+      await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, sessionId, followup:'stay', harness:'auto', model:'', newSession:false }) });
+    }
     box.value = ''; box.style.height = '';
     setTimeout(() => loadTerminal(), 900);
   } catch (error) { showFeedback(error.message); }
