@@ -632,6 +632,10 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 
 /* Permission mode: shown on the session, loud when the agent acts without asking */
 .live-pill.skip { color: #8a3b12; background: #fbe9dc; border-color: #ecc3a6; margin-left: 6px; }
-.permission-line { margin-top: 6px; font: 500 11.5px/1.5 var(--mono); color: var(--quiet); }
+.permission-line { font: 500 11.5px/1.5 var(--mono); color: var(--quiet); }
+.composer-permissions { margin: 0 0 8px; }
+.composer-permissions.hidden { display: none; }
+.permission-tag { font-weight: 600; }
+.permission-tag.skip { color: #b24a17; }
 .permission-line.skip { color: #b24a17; font-weight: 600; }
 .permission-line.skip::before { content: "⚠ "; }
