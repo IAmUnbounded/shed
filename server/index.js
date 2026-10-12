@@ -550,7 +550,7 @@ function endTarget(session) {
   }
   if (session.harness === 'codex' && session.tty) {
     const pid = pidOnTty(session.tty, 'codex');
-    if (pid) return { pid, command:'codex' };
+    if (pid) return { pid, command:'codex', codexThread:session.nativeId };
   }
   // Open in the Codex desktop app: no process of its own, so Shed asks the Codex app to stop the running turn.
   if (session.harness === 'codex' && !session.tty) return { codexThread:session.nativeId };
@@ -565,9 +565,14 @@ function cancelSessionTasks(sessionId, error) {
   if (changed) saveTasks();
 }
 async function endAgent(target) {
+  // Codex in Terminal runs its turn in the shared Codex daemon: stop the turn there first, then end the process.
+  if (target.codexThread && target.pid) {
+    await interruptCodexThread(target.codexThread).catch(() => {});
+    return stopAgent(target.pid, target.command);
+  }
   if (target.codexThread) {
-    const { interrupted } = await interruptCodexThread(target.codexThread);
-    return { stopped:true, forced:false, mode:interrupted ? 'interrupted' : 'idle' };
+    const { interrupted, commandsStopped } = await interruptCodexThread(target.codexThread);
+    return { stopped:true, forced:false, mode:interrupted || commandsStopped ? 'interrupted' : 'idle' };
   }
   if (target.task) {
     updateTask(target.task, { status:'cancelling' });
@@ -1039,7 +1044,8 @@ const server = http.createServer(async (req, res) => {
       // A task running in a Terminal window: end the agent in that window.
       if (task?.delivery === 'terminal' && task.tty && ['running', 'cancelling'].includes(task.status)) {
         const pid = pidOnTty(task.tty, task.harness);
-        const result = pid ? await stopAgent(pid, task.harness) : { stopped:true };
+        const thread = task.harness === 'codex' && task.sessionId?.startsWith('codex:') ? task.sessionId.slice('codex:'.length) : '';
+        const result = pid ? await endAgent({ pid, command:task.harness, codexThread:thread }) : { stopped:true };
         if (!result.stopped) return send(res, 409, { error:`${label[task.harness] || task.harness} did not stop. Close its Terminal window on the Mac.` });
         updateTask(task, { status:'cancelled', error:'Cancelled from Shed.', updatedAt:new Date().toISOString() });
         if (task.sessionId) cancelSessionTasks(task.sessionId, 'Session ended from Shed.');

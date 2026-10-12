@@ -78,3 +78,62 @@ test('choosing moves the pointer with arrow keys from where it is', () => {
   assert.equal(keysToChoose(menu, 0), '\u001b[A');
   assert.equal(keysToChoose(parseMenu(trust), 1), '\u001b[B');
 });
+
+// Claude's AskUserQuestion with several choices allowed: a description under each option, a Submit row, a divider,
+// then "Chat about this", and the hint 13 lines below the pointer.
+const multi = `
+────────────────────────────────────────────────────────────────────────────────
+←  ☒ Route  ☒ Accounts  ✔ Submit  →
+
+What do you already have set up?
+
+❯ 1. [✔] Stripe or PayPal
+         You can accept payments.
+  2. [ ] Upwork, Fiverr or similar
+         You have an active freelance profile.
+  3. [✔] Social following or email list
+         You have an audience to sell to.
+  4. [ ] Nothing yet
+         We start from scratch.
+  5. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel`;
+
+test('reads a multiple-choice question with descriptions, its Submit row and the option below the divider', () => {
+  const menu = parseMenu(multi);
+  assert.equal(menu.current, 0);
+  assert.deepEqual(menu.options, [
+    '1. [✔] Stripe or PayPal You can accept payments.',
+    '2. [ ] Upwork, Fiverr or similar You have an active freelance profile.',
+    '3. [✔] Social following or email list You have an audience to sell to.',
+    '4. [ ] Nothing yet We start from scratch.',
+    '5. [ ] Type something',
+    'Submit',
+    '6. Chat about this',
+  ]);
+  assert.equal(keysToChoose(menu, 5), '\u001b[B'.repeat(5));
+});
+
+test('an answered question left on screen above the input box is not offered again', () => {
+  assert.equal(parseMenu(`${multi}\n\n⏺ Thanks, starting now.\n\n────\n❯ \n────`), null);
+});
+
+test('reads the numbered list that ends the screen even without a hint line', () => {
+  const review = `
+Review your answers
+
+ ● Which fruits?
+   → Apple, Cherry
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+`;
+  assert.deepEqual(parseMenu(review), { options:['1. Submit answers', '2. Cancel'], current:0 });
+  // The input box with typed text that happens to start with a number is not a question.
+  assert.equal(parseMenu('⏺ Done.\n\n────\n❯ 1. do this next\n────\n  ⏵⏵ auto mode on'), null);
+});
