@@ -166,7 +166,21 @@ async function loadModels() {
   renderModelChoices();
   setEditorHarness($('#model-editor-harness').value);
 }
-function sessionRow(s) { const live = s.liveState !== 'history'; return `<button class="session-row ${live ? 'is-live' : ''}" data-session="${escapeHtml(s.id)}">${symbol(s.harness)}<div><div class="title"><span class="title-copy">${escapeHtml(s.title)}</span>${live ? `<span class="live-pill ${escapeHtml(s.liveState)}">${s.liveState === 'working' ? 'WORKING' : 'OPEN'}</span>` : ''}</div><div class="sub" title="${escapeHtml(s.cwd || '')}">${escapeHtml(projectName(s.cwd))}</div></div><span class="harness-name">${escapeHtml(s.harness === 'claude' ? 'Claude Code' : s.harness)}</span><span class="time">${relative(s.updatedAt)}</span><span class="arrow">↗</span></button>`; }
+// A session's permission mode, as the agent last showed or recorded it.
+const PERMISSIONS = {
+  skip:['SKIPS PERMISSIONS', 'Permissions skipped: acts without asking'],
+  auto:['AUTO', 'Auto mode: checks risky actions itself'],
+  edits:['ACCEPTS EDITS', 'Accepts edits, asks before commands'],
+  plan:['PLAN', 'Plan mode: plans only, changes nothing'],
+  ask:['', 'Asks before acting'],
+};
+function permissionLine(session) {
+  const mode = PERMISSIONS[session.permissions];
+  if (!mode || !['claude', 'codex'].includes(session.harness)) return '';
+  const howTo = session.tty && session.harness === 'claude' ? ' · Mode on the Terminal tab switches modes' : '';
+  return `<div class="permission-line ${escapeHtml(session.permissions)}">${escapeHtml(mode[1])}${escapeHtml(howTo)}</div>`;
+}
+function sessionRow(s) { const live = s.liveState !== 'history'; return `<button class="session-row ${live ? 'is-live' : ''}" data-session="${escapeHtml(s.id)}">${symbol(s.harness)}<div><div class="title"><span class="title-copy">${escapeHtml(s.title)}</span>${live ? `<span class="live-pill ${escapeHtml(s.liveState)}">${s.liveState === 'working' ? 'WORKING' : 'OPEN'}</span>` : ''}${s.permissions === 'skip' ? '<span class="live-pill skip" title="Permissions skipped: acts without asking">SKIPS PERMISSIONS</span>' : ''}</div><div class="sub" title="${escapeHtml(s.cwd || '')}">${escapeHtml(projectName(s.cwd))}</div></div><span class="harness-name">${escapeHtml(s.harness === 'claude' ? 'Claude Code' : s.harness)}</span><span class="time">${relative(s.updatedAt)}</span><span class="arrow">↗</span></button>`; }
 function taskCard(t) { return `<div class="task-card" data-task="${escapeHtml(t.id)}"><div class="task-card-top">${symbol(t.harness)}<span>${escapeHtml(t.harness === 'claude' ? 'Claude Code' : t.harness)} · ${escapeHtml(t.model || 'default model')}</span><span class="badge ${escapeHtml(t.status)}" style="margin-left:auto">${escapeHtml(t.status)}</span></div><div class="task-card-title">${escapeHtml(t.title)}</div><div class="task-card-meta"><span>${escapeHtml(projectName(t.cwd))}</span><span>${relative(t.createdAt)} ↗</span></div></div>`; }
 // Live sessions are pixel agents, one per harness, in the spirit of Claude Code's Clawd:
 // they type on a laptop while working, sip coffee while waiting, and hold up a sign when they need your OK.
@@ -600,7 +614,7 @@ async function openSession(id, silent = false) {
     renderModelChoices();
     const status = session.liveState === 'history' ? 'HISTORY' : session.liveState === 'working' ? 'WORKING NOW' : session.liveState === 'asking' ? 'NEEDS YOUR OK' : 'OPEN ON DESKTOP';
     $('#drawer-harness').innerHTML = `${symbol(session.harness)} <span style="vertical-align:middle;margin-left:7px">${escapeHtml(session.harness.toUpperCase())} · ${status}</span>`;
-    const changed = setDrawerContent(`<header class="chat-head"><h2 class="drawer-title">${escapeHtml(projectName(session.cwd) || 'Untitled project')}</h2><p class="chat-topic" title="${escapeHtml(session.title)}">${escapeHtml(topicLine(session.title))}</p><div class="drawer-path">${escapeHtml(session.cwd || 'Unknown folder')} · updated ${relative(session.updatedAt)}</div></header>${messages.length ? messages.map(m => `<div class="message ${escapeHtml(m.role)}"><div class="message-label">${m.role === 'user' ? 'YOU' : escapeHtml(session.harness.toUpperCase())} ${m.at ? '· ' + relative(m.at) : ''}</div>${m.role === 'user' ? `<div class="message-body">${escapeHtml(m.text)}</div>` : `<div class="message-body md">${renderMarkdown(m.text)}</div>${fileChips(m.text)}`}</div>`).join('') : '<div class="table-empty">No messages found in this session record.</div>'}${pendingMessages(session, messages)}`, !silent);
+    const changed = setDrawerContent(`<header class="chat-head"><h2 class="drawer-title">${escapeHtml(projectName(session.cwd) || 'Untitled project')}</h2><p class="chat-topic" title="${escapeHtml(session.title)}">${escapeHtml(topicLine(session.title))}</p><div class="drawer-path">${escapeHtml(session.cwd || 'Unknown folder')} · updated ${relative(session.updatedAt)}</div>${permissionLine(session)}</header>${messages.length ? messages.map(m => `<div class="message ${escapeHtml(m.role)}"><div class="message-label">${m.role === 'user' ? 'YOU' : escapeHtml(session.harness.toUpperCase())} ${m.at ? '· ' + relative(m.at) : ''}</div>${m.role === 'user' ? `<div class="message-body">${escapeHtml(m.text)}</div>` : `<div class="message-body md">${renderMarkdown(m.text)}</div>${fileChips(m.text)}`}</div>`).join('') : '<div class="table-empty">No messages found in this session record.</div>'}${pendingMessages(session, messages)}`, !silent);
     if (silent) { if (changed) content.scrollTop = state.pinBottom || stickToBottom ? content.scrollHeight : priorScroll; }
     else { state.pinBottom = true; content.scrollTop = content.scrollHeight; }
     $('#drawer-tabs').classList.toggle('hidden', !session.tty && !session.cwd);

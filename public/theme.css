@@ -629,3 +629,9 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 .composer-selects .attach-button { align-self: center; justify-self: start; width: auto; height: 32px; }
 .drawer-composer .drawer-actions .attach-button { background: var(--surface); color: var(--muted); border: 1px solid var(--line); min-width: 0; }
 .drawer-composer .drawer-actions .attach-button:hover { color: var(--ink); border-color: var(--accent); }
+
+/* Permission mode: shown on the session, loud when the agent acts without asking */
+.live-pill.skip { color: #8a3b12; background: #fbe9dc; border-color: #ecc3a6; margin-left: 6px; }
+.permission-line { margin-top: 6px; font: 500 11.5px/1.5 var(--mono); color: var(--quiet); }
+.permission-line.skip { color: #b24a17; font-weight: 600; }
+.permission-line.skip::before { content: "⚠ "; }

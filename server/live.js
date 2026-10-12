@@ -10,6 +10,16 @@ const askingPatterns = {
 };
 // Mid-turn, both CLIs show "esc to interrupt" in their footer, even while waiting on their own tools or background work.
 const activePattern = /esc to interrupt|Working \(/i;
+// Claude's footer names its permission mode (Shift+Tab changes it mid-session); with no mode named it asks first.
+// Only a screen showing the input box counts, since a question or menu hides the footer.
+export function footerMode(screen) {
+  const text = String(screen || '');
+  if (/bypass permissions on/i.test(text)) return 'skip';
+  if (/auto mode on/i.test(text)) return 'auto';
+  if (/accept edits on/i.test(text)) return 'edits';
+  if (/plan mode on/i.test(text)) return 'plan';
+  return /[─━]{10,}\s*\n\s*❯/.test(text) && /\n\s*❯[^\n]*\n\s*[─━]{10,}/.test(text) ? 'ask' : '';
+}
 // Reading a Terminal window takes about 0.3 seconds. Readings are refreshed in the background (at most every
 // 3 seconds per window) and the last one is returned straight away, so session discovery never waits on Terminal.
 const screenCache = new Map();
@@ -21,7 +31,7 @@ export function terminalState(tty, harness) {
   if (!entry.pending && Date.now() - entry.at > 3000) {
     entry.pending = true;
     readTerminalAsync(tty, 14)
-      .then(screen => { entry.state = { asking:askingPatterns[harness].test(screen || ''), active:activePattern.test(screen || '') }; })
+      .then(screen => { entry.state = { asking:askingPatterns[harness].test(screen || ''), active:activePattern.test(screen || ''), mode:harness === 'claude' ? footerMode(screen) : '' }; })
       .catch(() => {})
       .finally(() => { entry.at = Date.now(); entry.pending = false; });
   }
@@ -120,7 +130,8 @@ export function liveSessionStates(sessions) {
     const pid = session.file && files.get(session.file);
     const claudeLive = session.harness === 'claude' && claude.get(session.nativeId);
     if (claudeLive) {
-      states.set(session.id, { liveState:claudeLiveState(claudeLive), livePid:claudeLive.pid, tty:claudeLive.tty });
+      const mode = terminalState(claudeLive.tty, 'claude').mode;
+      states.set(session.id, { liveState:claudeLiveState(claudeLive), livePid:claudeLive.pid, tty:claudeLive.tty, ...(mode ? { permissions:mode } : {}) });
     } else if (pid && processes.get(pid) === session.harness) {
       const tty = ttyOf(pid);
       const screen = session.harness === 'codex' ? terminalState(tty, 'codex') : null;

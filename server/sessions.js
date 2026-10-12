@@ -78,6 +78,21 @@ function lastModel(text) {
   return found.at(-1) || '';
 }
 
+// How freely the agent acts, as the transcript last recorded it: 'skip' (never asks), 'auto', 'edits' (accepts
+// edits), 'plan', 'ask' (asks first), or '' when unknown. Claude records its mode on each message; Codex its
+// approval and sandbox policy on each turn.
+const CLAUDE_MODES = { bypassPermissions:'skip', auto:'auto', acceptEdits:'edits', plan:'plan', default:'ask', dontAsk:'skip' };
+export function claudePermissions(text) {
+  const mode = [...text.matchAll(/"permissionMode"\s*:\s*"(\w+)"/g)].at(-1)?.[1];
+  return CLAUDE_MODES[mode] || '';
+}
+export function codexPermissions(text) {
+  const approval = [...text.matchAll(/"approval_policy"\s*:\s*"([\w-]+)"/g)].at(-1)?.[1];
+  const sandbox = [...text.matchAll(/"sandbox_policy"\s*:\s*\{\s*"type"\s*:\s*"([\w-]+)"/g)].at(-1)?.[1];
+  if (!approval) return '';
+  return approval === 'never' && sandbox === 'danger-full-access' ? 'skip' : 'ask';
+}
+
 function codexRecord(file) {
   const stat = fs.statSync(file);
   const lines = jsonLines(sliceFile(file, 256 * 1024));
@@ -89,7 +104,7 @@ function codexRecord(file) {
   const recent = jsonLines(tail).filter(x => x.type === 'response_item' && x.payload?.type === 'message' && x.payload.role === 'user').map(x => contentText(x.payload.content)).filter(isUsefulPrompt);
   const id = path.basename(file).match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/)?.[1] || meta.id || meta.session_id;
   if (!id) return null;
-  return { id: `codex:${id}`, nativeId: id, harness: 'codex', title: title || 'Untitled Codex session', lastPrompt: clean(recent.at(-1), 260), cwd: meta.cwd || '', currentModel: lastModel(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop' };
+  return { id: `codex:${id}`, nativeId: id, harness: 'codex', title: title || 'Untitled Codex session', lastPrompt: clean(recent.at(-1), 260), cwd: meta.cwd || '', currentModel: lastModel(tail), permissions: codexPermissions(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop' };
 }
 
 function claudeRecord(file) {
@@ -100,7 +115,7 @@ function claudeRecord(file) {
   const tail = sliceFile(file, 128 * 1024, true);
   const recent = jsonLines(tail).filter(x => x.type === 'user' && !x.isSidechain).map(x => contentText(x.message?.content)).filter(isUsefulPrompt);
   const id = first?.sessionId || path.basename(file, '.jsonl');
-  return { id: `claude:${id}`, nativeId: id, harness: 'claude', title: title || 'Untitled Claude session', lastPrompt: clean(recent.at(-1), 260), cwd: first?.cwd || '', currentModel: lastModel(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop' };
+  return { id: `claude:${id}`, nativeId: id, harness: 'claude', title: title || 'Untitled Claude session', lastPrompt: clean(recent.at(-1), 260), cwd: first?.cwd || '', currentModel: lastModel(tail), permissions: claudePermissions(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop' };
 }
 
 function geminiRecord(file) {
@@ -174,7 +189,7 @@ export function discoverSessions() {
   try { sessions.push(...opencodeCached()); } catch {}
   const live = liveSessionStates(sessions);
   return sessions.filter(session => !(session.title.startsWith('Untitled ') && !session.cwd))
-    .map(session => ({ ...session, liveState:live.get(session.id)?.liveState || 'history', tty:live.get(session.id)?.tty || '' }))
+    .map(session => ({ ...session, liveState:live.get(session.id)?.liveState || 'history', tty:live.get(session.id)?.tty || '', permissions:live.get(session.id)?.permissions || session.permissions || '' }))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
