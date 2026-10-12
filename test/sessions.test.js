@@ -37,3 +37,25 @@ test('a message typed into a Claude terminal is tracked through its transcript',
   assert.equal(progress.found, true);
   assert.equal(progress.output, 'PING again');
 });
+
+test('a typed message is still found after megabytes of image data, and the reply is read as it grows', async () => {
+  const { claudeTerminalProgress } = await import('../server/sessions.js');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'laya-terminal-')), 'session.jsonl');
+  const earlier = JSON.stringify({ type:'assistant', timestamp:'2026-10-06T09:00:00.000Z', message:{ content:[{ type:'text', text:'old reply' }] } }) + '\n';
+  fs.writeFileSync(file, earlier);
+  const prompt = 'Look at this video\n\nAttached file (saved on this Mac):\n- /tmp/clip.mp4';
+  const task = { id:'big-reply', transcriptFile:file, transcriptOffset:Buffer.byteLength(earlier), agentPrompt:prompt, prompt:'Look at this video', createdAt:'2026-10-06T10:00:00.000Z' };
+  // Claude records a multi-line paste wrapped in <pasted_content> tags.
+  const row = x => JSON.stringify(x) + '\n';
+  fs.appendFileSync(file, row({ type:'user', timestamp:'2026-10-06T10:00:01.000Z', message:{ content:`\n\n<pasted_content id="1d56">\n${prompt}\n</pasted_content id="1d56">\n` } }));
+  assert.equal(claudeTerminalProgress(task).found, true);
+  // Frames from the video: about 6 MB of image data after the message, half of the last row not yet written.
+  const image = row({ type:'user', timestamp:'2026-10-06T10:00:02.000Z', message:{ content:[{ type:'tool_result', content:[{ type:'image', source:{ type:'base64', data:'A'.repeat(6 * 1024 * 1024) } }] }] } });
+  const reply = row({ type:'assistant', timestamp:'2026-10-06T10:00:05.000Z', message:{ content:[{ type:'text', text:'I watched the reel.' }] } });
+  fs.appendFileSync(file, image + reply.slice(0, 20));
+  assert.equal(claudeTerminalProgress(task).output, '');
+  fs.appendFileSync(file, reply.slice(20));
+  const done = claudeTerminalProgress(task);
+  assert.equal(done.found, true);
+  assert.equal(done.output, 'I watched the reel.');
+});

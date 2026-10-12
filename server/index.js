@@ -8,13 +8,16 @@ import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript } from './sessions.js';
 import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState } from './live.js';
-import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync } from './terminal.js';
+import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent } from './terminal.js';
 import { rankSessions } from './router.js';
 import { decideRoute, decideFollowup, decideModel, probeLaya, getLaya, layaStatus } from './laya.js';
 import { harnesses, modelConfig, validateModelConfig } from './models.js';
 import { harnessHealth, refreshHarnessHealth } from './health.js';
 import { initPush, pushPublicKey, subscribe, unsubscribe, notify, isSubscribed, pushCount } from './notify.js';
 import { listArtifacts, resolveInside, sendFile } from './files.js';
+import { interruptCodexThread } from './codex-app.js';
+import { uploadStore, attachmentNote, UPLOAD_ID } from './uploads.js';
+import { parseMenu, keysToChoose } from './menu.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
@@ -38,6 +41,7 @@ let cached = { at: 0, sessions: [] };
 let tasks = loadTasks();
 let settings = loadSettings();
 initPush(dataDir);
+const uploads = uploadStore(dataDir);
 const attempts = new Map();
 
 function getToken() {
@@ -54,7 +58,8 @@ function getToken() {
 function remoteUrl() {
   try {
     const value = fs.readFileSync(remoteUrlFile, 'utf8').trim();
-    return /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(value) ? value : '';
+    // A Quick Tunnel address, or a named tunnel's permanent hostname; tunnel.js writes it once the tunnel is connected.
+    return /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(value) ? value : '';
   } catch { return ''; }
 }
 function commandExists(command) {
@@ -414,7 +419,7 @@ function sendVersioned(req, res, value) {
 }
 // Lists only need what a row shows; the full task (reply text and all) loads when one is opened.
 const taskSummary = t => ({ id:t.id, title:t.title, status:t.status, harness:t.harness, sessionId:t.sessionId, cwd:t.cwd, createdAt:t.createdAt, updatedAt:t.updatedAt, delivery:t.delivery, tty:t.tty, waitingOn:t.waitingOn, handoffFrom:t.handoffFrom, returnedTo:t.returnedTo, model:t.model, modelSource:t.modelSource, routeSource:t.routeSource, error:(t.error || '').slice(0, 300) });
-const publicTask = ({ agentPrompt, transcriptFile, claudeSessionId, nativeSessionId, submitRetries, lastSubmitRetry, waitNotified, ...rest }) => rest;
+const publicTask = ({ agentPrompt, transcriptFile, transcriptOffset, claudeSessionId, nativeSessionId, submitRetries, lastSubmitRetry, waitNotified, ...rest }) => rest;
 function send(res, status, value, headers = {}) {
   const data = JSON.stringify(value);
   res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
@@ -525,7 +530,7 @@ async function returnToOrigin(task) {
   if (!task.handoffFrom || task.returnedTo || task.returnedAt) return;
   task.returnedAt = new Date().toISOString(); saveTasks();
   try {
-    const { input, route, cwd, model } = await planTask({ prompt:task.prompt, sessionId:task.handoffFrom, followup:'stay', harness:'auto', model:'', newSession:false });
+    const { input, route, cwd, model } = await planTask({ prompt:task.prompt, attachmentPaths:task.attachments || [], sessionId:task.handoffFrom, followup:'stay', harness:'auto', model:'', newSession:false });
     const back = startTask(input, route, model, cwd);
     Object.assign(task, { returnedTo:back.id, error:`${task.error} Shed sent your message back to the original ${back.harness} session instead.`.trim() }); saveTasks();
     notify({ title:`Handoff to ${label[task.harness] || task.harness} did not start`, body:`Your message went back to the original ${label[back.harness] || back.harness} session.`, url:`/?task=${encodeURIComponent(back.id)}`, tag:`task-${task.id}` }).catch(() => {});
@@ -533,13 +538,55 @@ async function returnToOrigin(task) {
     Object.assign(task, { error:`${task.error} Shed could not send it back to the original session either: ${error.message}`.trim() }); saveTasks();
   }
 }
+// Ending a session: the agent process that holds it (in its Terminal tab, or a background run Shed started).
+// The Terminal window stays open at its shell prompt, so the person can still read what happened.
+function endTarget(session) {
+  if (!session || session.liveState === 'history') return null;
+  if (session.harness === 'claude') {
+    const pid = claudeLiveSessions().get(session.nativeId)?.pid;
+    if (pid) return { pid, command:'claude' };
+  }
+  if (session.harness === 'codex' && session.tty) {
+    const pid = pidOnTty(session.tty, 'codex');
+    if (pid) return { pid, command:'codex', codexThread:session.nativeId };
+  }
+  // Open in the Codex desktop app: no process of its own, so Shed asks the Codex app to stop the running turn.
+  if (session.harness === 'codex' && !session.tty) return { codexThread:session.nativeId };
+  const task = tasks.find(t => t.sessionId === session.id && active.has(t.id));
+  return task ? { task } : null;
+}
+function cancelSessionTasks(sessionId, error) {
+  let changed = false;
+  for (const task of tasks) if (task.sessionId === sessionId && ['running', 'queued', 'cancelling'].includes(task.status) && task.delivery !== 'queue') {
+    Object.assign(task, { status:'cancelled', error, updatedAt:new Date().toISOString() }); changed = true;
+  }
+  if (changed) saveTasks();
+}
+async function endAgent(target) {
+  // Codex in Terminal runs its turn in the shared Codex daemon: stop the turn there first, then end the process.
+  if (target.codexThread && target.pid) {
+    await interruptCodexThread(target.codexThread).catch(() => {});
+    return stopAgent(target.pid, target.command);
+  }
+  if (target.codexThread) {
+    const { interrupted, commandsStopped } = await interruptCodexThread(target.codexThread);
+    return { stopped:true, forced:false, mode:interrupted || commandsStopped ? 'interrupted' : 'idle' };
+  }
+  if (target.task) {
+    updateTask(target.task, { status:'cancelling' });
+    active.get(target.task.id)?.kill('SIGTERM');
+    return { stopped:true, forced:false };
+  }
+  return stopAgent(target.pid, target.command);
+}
+function transcriptSize(file) { try { return fs.statSync(file).size; } catch { return 0; } }
 function titleFor(prompt) { return prompt.replace(/\s+/g, ' ').trim().slice(0, 90); }
 function updateTask(task, patch) { Object.assign(task, patch); saveTasks(); }
 
 function queueCodexTask(task, session) {
   Object.assign(task, { status:'queued', delivery:'queue', transcriptFile:session.file, model:'', modelReason:'The open Codex session keeps its current model.', modelSource:'session', error:'', output:'Waiting for the open Codex session to accept this message.', updatedAt:new Date().toISOString() });
   saveTasks();
-  const child = spawn('codex', ['queue', '--thread', session.nativeId, '--message', task.prompt], { cwd:task.cwd, env:{ ...process.env, NO_COLOR:'1' }, stdio:['ignore', 'pipe', 'pipe'] });
+  const child = spawn('codex', ['queue', '--thread', session.nativeId, '--message', task.agentPrompt || task.prompt], { cwd:task.cwd, env:{ ...process.env, NO_COLOR:'1' }, stdio:['ignore', 'pipe', 'pipe'] });
   active.set(task.id, child);
   let result = '';
   child.stdout.on('data', chunk => { result += chunk.toString(); });
@@ -562,6 +609,17 @@ function queueCodexTask(task, session) {
 const CONTROL_KEYS = ['\u0003', '\u001b[Z', '1', '2', '3', ''];
 const loginCommands = { codex:['codex', 'login'], claude:['claude', 'auth', 'login'], gemini:['gemini'], opencode:['opencode', 'auth', 'login'], pi:['pi'] };
 const loginTerminals = new Map();
+// A terminal reading for the phone: the screen text plus, when the agent is asking, the options it offers.
+function terminalReading(tty, text) { return { tty, text, menu:parseMenu(text.split('\n').slice(-40).join('\n')) }; }
+// Choosing an option: the screen is read again and the option must still be there with the same text, so a tap made
+// while the question changed cannot land on something else. The pointer moves with arrow keys, then Return chooses.
+async function chooseOption(tty, input) {
+  const index = Number(input.option);
+  const menu = parseMenu(((await readTerminalAsync(tty, 40)) || '').split('\n').slice(-40).join('\n'));
+  if (!menu || !Number.isInteger(index) || menu.options[index] !== input.label) return { status:409, error:'The question on the Mac has changed. Look at the terminal again, then choose.' };
+  await typeIntoTerminalAsync(tty, keysToChoose(menu, index));
+  return { status:200 };
+}
 
 // Claude runs in a visible Terminal: typed into the tab that already holds the session, or a new window that resumes it.
 const QUESTION_ON_SCREEN = /Do you want to|Esc to cancel|Enter to confirm|❯\s*1\.|›\s*1\.\s|Would you like to|Press enter to confirm|trust this folder/i;
@@ -582,6 +640,8 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       // Never type a message while the agent shows a question: the Return would pick whatever option is highlighted
       // (for example "No, exit" on Claude's folder-trust question).
       if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`${label} is waiting for an answer in its Terminal. Answer it from the Terminal tab first, then send your message again.`);
+      // Where the transcript ends now: Shed looks for the message (and the reply) from here on.
+      task.transcriptOffset = transcriptSize(session.file);
       await typeIntoTerminalAsync(session.tty, agentPrompt, { prompt:true, agent:task.harness });
       Object.assign(task, { tty:session.tty, transcriptFile:session.file, [task.harness === 'codex' ? 'nativeSessionId' : 'claudeSessionId']:session.nativeId, permissions:'terminal', output:`Typed into the open Terminal tab. Waiting for ${label} to pick it up.` });
     } else if (task.harness === 'codex') {
@@ -598,6 +658,7 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       fs.mkdirSync(promptDir, { recursive:true, mode:0o700 });
       const promptFile = path.join(promptDir, `${task.id}.txt`);
       fs.writeFileSync(promptFile, agentPrompt, { mode:0o600 });
+      if (session) task.transcriptOffset = transcriptSize(session.file);
       const argv = ['claude', ...(session ? ['--resume', session.nativeId] : []), ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-skip-permissions'] : [])];
       const tty = await openTerminalAsync(cwd, argv, promptFile);
       Object.assign(task, { tty, permissions:skipPermissions ? 'skip' : 'default', output:`Opened a new Terminal window on the Mac (${tty.replace('/dev/', '')}).${skipPermissions ? '' : ' Claude will ask there before using tools; answer from the Terminal view.'}` });
@@ -610,12 +671,15 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
 }
 
 function startTask(input, route, modelDecision, requestedCwd = '') {
-  const agentPrompt = (input.agentPrompt || input.prompt).trim();
+  let agentPrompt = (input.agentPrompt || input.prompt).trim();
   const harness = route.session?.harness || route.harness;
   if (!available[harness]) throw new Error(`${harness} CLI is not installed on this desktop.`);
   if (harness === 'gemini' && route.session && !route.session.cwd && !requestedCwd) throw new Error('This Gemini record does not include its original project path, so it cannot be resumed safely.');
   const cwd = route.session?.cwd && fs.existsSync(route.session.cwd) ? route.session.cwd :
     requestedCwd && fs.existsSync(requestedCwd) && fs.statSync(requestedCwd).isDirectory() ? requestedCwd : root;
+  // Attached files move into the project, and the agent is told where they are.
+  const attachments = [...(input.attachmentPaths || []), ...uploads.place(input.attachments || [], cwd === root ? '' : cwd)];
+  agentPrompt += attachmentNote(attachments);
   const task = {
     id: crypto.randomUUID(), prompt: input.prompt.trim(), title: titleFor(input.prompt),
     status: 'running', harness, sessionId: route.session?.id || null,
@@ -623,6 +687,7 @@ function startTask(input, route, modelDecision, requestedCwd = '') {
     routeReason: route.reason, routeSource: route.source || 'local', routeFallbackReason:route.fallbackReason || '',
     model:modelDecision.model, modelReason:modelDecision.reason, modelSource:modelDecision.source, modelFallbackReason:modelDecision.fallbackReason || '', cwd, output: '', error: '',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    ...(attachments.length ? { attachments, agentPrompt } : {}),
   };
   tasks.unshift(task); saveTasks();
   // Codex open in the desktop app (no terminal) takes queued messages; everything else runs in a visible Terminal.
@@ -848,12 +913,13 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') {
         const text = await readTerminalAsync(tty);
         if (text === null) { loginTerminals.delete(name); return send(res, 404, { error:'The sign-in window was closed.' }); }
-        return sendVersioned(req, res, { tty, text });
+        return sendVersioned(req, res, terminalReading(tty, text));
       }
       if (req.method === 'POST') {
         const input = await body(req);
-        if (typeof input.text !== 'string' || input.text.length > 4000) return send(res, 400, { error:'Send up to 4,000 characters.' });
         if (!agentInForeground(tty, [loginCommands[name][0], 'node'])) return send(res, 409, { error:'The sign-in has finished in that window, so Shed will not type into it.' });
+        if (input.option !== undefined) { const result = await chooseOption(tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
+        if (typeof input.text !== 'string' || input.text.length > 4000) return send(res, 400, { error:'Send up to 4,000 characters.' });
         await typeIntoTerminalAsync(tty, input.text);
         return send(res, 200, { ok:true });
       }
@@ -865,12 +931,13 @@ const server = http.createServer(async (req, res) => {
       if (!task?.tty) return send(res, 404, { error:'This task has no Terminal window.' });
       if (req.method === 'GET') {
         const text = await readTerminalAsync(task.tty);
-        return text === null ? send(res, 404, { error:'That Terminal window is closed.' }) : sendVersioned(req, res, { tty:task.tty, text });
+        return text === null ? send(res, 404, { error:'That Terminal window is closed.' }) : sendVersioned(req, res, terminalReading(task.tty, text));
       }
       if (req.method === 'POST') {
         const input = await body(req);
-        if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here.' });
         if (!agentInForeground(task.tty, [task.harness, 'node'])) return send(res, 409, { error:`${task.harness} is no longer running in that Terminal window.` });
+        if (input.option !== undefined) { const result = await chooseOption(task.tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
+        if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here.' });
         await typeIntoTerminalAsync(task.tty, input.text);
         return send(res, 200, { ok:true });
       }
@@ -885,21 +952,36 @@ const server = http.createServer(async (req, res) => {
       if (!session.tty) return send(res, 404, { error:'This session is not open in a Terminal tab.' });
       if (req.method === 'GET') {
         const text = await readTerminalAsync(session.tty);
-        return text === null ? send(res, 404, { error:'That Terminal tab is no longer open.' }) : sendVersioned(req, res, { tty:session.tty, text });
+        return text === null ? send(res, 404, { error:'That Terminal tab is no longer open.' }) : sendVersioned(req, res, terminalReading(session.tty, text));
       }
       if (req.method === 'POST') {
         const input = await body(req);
-        // Only the on-screen control keys, and only while the agent is the foreground program: never free text into a shell.
-        if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here. Send messages from the message box.' });
+        // Only the on-screen control keys or a listed option, and only while the agent is the foreground program: never free text into a shell.
         if (!agentInForeground(session.tty, session.harness)) return send(res, 409, { error:`${session.harness} is no longer running in that Terminal tab.` });
+        if (input.option !== undefined) { const result = await chooseOption(session.tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
+        if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here. Send messages from the message box.' });
         await typeIntoTerminalAsync(session.tty, input.text);
         return send(res, 200, { ok:true });
       }
     }
+    const endMatch = pathname.match(/^\/api\/sessions\/(.+)\/end$/);
+    if (endMatch && req.method === 'POST') {
+      const session = sessions(true).find(s => s.id === decodeURIComponent(endMatch[1]));
+      if (!session) return send(res, 404, { error:'Session not found.' });
+      const target = endTarget(session);
+      if (!target) return send(res, 409, { error:'This session is not running anything Shed can end.' });
+      const result = await endAgent(target);
+      cancelSessionTasks(session.id, 'Session ended from Shed.');
+      sessions(true); broadcast('sessions', {});
+      if (!result.stopped) return send(res, 409, { error:`${label[session.harness] || session.harness} did not stop. Close its Terminal window on the Mac.` });
+      return send(res, 200, { ok:true, forced:Boolean(result.forced), mode:result.mode || 'ended' });
+    }
     if (pathname.startsWith('/api/sessions/') && req.method === 'GET') {
       const id = decodeURIComponent(pathname.slice('/api/sessions/'.length));
       const session = sessions().find(s => s.id === id);
-      return session ? sendVersioned(req, res, { session: publicSession(session), messages: sessionMessages(session) }) : send(res, 404, { error: 'Session not found.' });
+      // Whether the drawer offers "End session": something Shed can stop is running for it.
+      const canEnd = Boolean(session && session.liveState !== 'history' && (session.tty || ['claude', 'codex'].includes(session.harness) || tasks.some(t => t.sessionId === session.id && active.has(t.id))));
+      return session ? sendVersioned(req, res, { session:{ ...publicSession(session), canEnd }, messages: sessionMessages(session) }) : send(res, 404, { error: 'Session not found.' });
     }
     if (pathname === '/api/route' && req.method === 'POST') {
       const input = await body(req);
@@ -917,8 +999,20 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { route: { harness:route.session?.harness || route.harness, handoff:Boolean(route.handoff), reason:route.reason, fallbackReason:route.fallbackReason || '', confidence:route.score ?? null, source:route.source, model:model.model, modelSource:model.source, modelReason:model.reason } });
     }
     if (pathname === '/api/tasks' && req.method === 'GET') { refreshQueuedTasks(); return sendVersioned(req, res, { tasks: tasks.slice(0, 60).map(taskSummary) }); }
+    // Attachments: the file is the request body; its name comes in X-File-Name (URI-encoded).
+    if (pathname === '/api/uploads' && req.method === 'POST') {
+      let name = '';
+      try { name = decodeURIComponent(String(req.headers['x-file-name'] || '')); } catch { name = ''; }
+      try { return send(res, 201, await uploads.stage(req, name)); }
+      catch (error) { return send(res, error.status || 400, { error:error.message }); }
+    }
+    const uploadMatch = pathname.match(/^\/api\/uploads\/([\w-]+)$/);
+    if (uploadMatch && req.method === 'DELETE') { uploads.discard(uploadMatch[1]); return send(res, 200, { ok:true }); }
     if (pathname === '/api/tasks' && req.method === 'POST') {
       let input = await body(req);
+      const attachmentIds = Array.isArray(input.attachments) ? input.attachments.filter(id => typeof id === 'string' && UPLOAD_ID.test(id)).slice(0, 10) : [];
+      input = { ...input, attachments:attachmentIds, attachmentPaths:[] };
+      if (attachmentIds.length && typeof input.prompt === 'string' && !input.prompt.trim()) input.prompt = attachmentIds.length > 1 ? 'Take a look at these files.' : 'Take a look at this file.';
       if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 20000) return send(res, 400, { error: 'Prompt must be between 1 and 20,000 characters.' });
       let { input:planned, route, cwd, model } = await planTask(input);
       input = planned;
@@ -936,9 +1030,19 @@ const server = http.createServer(async (req, res) => {
     if (pathname.endsWith('/cancel') && pathname.startsWith('/api/tasks/') && req.method === 'POST') {
       const id = pathname.split('/')[3];
       const task = tasks.find(t => t.id === id), child = active.get(id);
-      if (!task || !child) return send(res, 404, { error: 'Running task not found.' });
-      updateTask(task, { status: 'cancelling' }); child.kill('SIGTERM');
-      return send(res, 200, { task });
+      if (task && child) { updateTask(task, { status: 'cancelling' }); child.kill('SIGTERM'); return send(res, 200, { task }); }
+      // A task running in a Terminal window: end the agent in that window.
+      if (task?.delivery === 'terminal' && task.tty && ['running', 'cancelling'].includes(task.status)) {
+        const pid = pidOnTty(task.tty, task.harness);
+        const thread = task.harness === 'codex' && task.sessionId?.startsWith('codex:') ? task.sessionId.slice('codex:'.length) : '';
+        const result = pid ? await endAgent({ pid, command:task.harness, codexThread:thread }) : { stopped:true };
+        if (!result.stopped) return send(res, 409, { error:`${label[task.harness] || task.harness} did not stop. Close its Terminal window on the Mac.` });
+        updateTask(task, { status:'cancelled', error:'Cancelled from Shed.', updatedAt:new Date().toISOString() });
+        if (task.sessionId) cancelSessionTasks(task.sessionId, 'Session ended from Shed.');
+        sessions(true); broadcast('sessions', {});
+        return send(res, 200, { task });
+      }
+      return send(res, 404, { error: 'Running task not found.' });
     }
     return send(res, 404, { error: 'Not found.' });
   } catch (error) { return send(res, 400, { error: error.message || 'Request failed.' }); }

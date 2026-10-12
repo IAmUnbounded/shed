@@ -229,6 +229,6 @@ test('discovers a desktop session and resumes it through the task API', async ()
     assert.equal(fs.existsSync(freshTask.cwd), true);
   } finally {
     child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive:true, force:true });
+    fs.rmSync(dir, { recursive:true, force:true, maxRetries:10, retryDelay:100 }); // the server may still be writing as it exits
   }
 });
