@@ -1,6 +1,6 @@
 # Shed
 
-*Powered by Laya.*
+*Powered by Laya.* MIT licensed.
 
 **Website:** https://shed-sigma.vercel.app
 
@@ -9,6 +9,20 @@
 ▶ [Watch the 80-second tour](https://shed-sigma.vercel.app/#tour) · [Download the video (MP4)](https://shed-sigma.vercel.app/shed-tour.mp4)
 
 A local, internet-accessible task plane for desktop coding agents. It shows sessions that are currently open in Codex, Claude Code, Gemini, Pi, and OpenCode, refreshes their transcripts, and lets you continue them from a browser. You can also start a completely new coding session from a phone when no desktop session exists.
+
+## Install
+
+```bash
+curl -fsSL https://shed-sigma.vercel.app/install.sh | sh
+```
+
+macOS only. The [installer](site/install.sh) clones Shed into `~/.shed/app` and installs Node and `cloudflared` with Homebrew if they are missing. It then adds two launch agents (`dev.shed.server`, `dev.shed.tunnel`) that start at login, and opens Shed in your browser. Run the same line again to update. To remove Shed:
+
+```bash
+curl -fsSL https://shed-sigma.vercel.app/install.sh | sh -s -- --uninstall
+```
+
+Options (environment variables): `SHED_HOME` (default `~/.shed`), `SHED_PORT` (default 4378), `SHED_REF` (git branch, default `main`).
 
 ## Open it
 

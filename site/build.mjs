@@ -39,5 +39,5 @@ ${body}
 fs.rmSync(out, { recursive:true, force:true });
 fs.mkdirSync(out, { recursive:true });
 fs.writeFileSync(path.join(out, 'index.html'), html);
-for (const file of ['shed-tour.mp4', 'tour-poster.jpg', 'logo.svg']) fs.copyFileSync(path.join(here, file), path.join(out, file));
+for (const file of ['shed-tour.mp4', 'tour-poster.jpg', 'logo.svg', 'install.sh']) fs.copyFileSync(path.join(here, file), path.join(out, file));
 console.log(`Built ${out} for ${site || 'local preview'}`);

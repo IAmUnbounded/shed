@@ -203,6 +203,17 @@ footer a { color: var(--cream); }
   *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; }
   .packet { display: none; }
 }
+/* Install line (px0-style: the command is the call to action) */
+.install { margin-top: 30px; max-width: 560px; min-width: 0; }
+.hero > * { min-width: 0; }
+.install-box { display: flex; align-items: center; gap: 10px; background: #0d1310; border: 1px solid var(--line); border-radius: 12px; padding: 12px 12px 12px 16px; font: 500 14px var(--mono); }
+.install-box code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; color: var(--cream); }
+.install-box code::-webkit-scrollbar { display: none; }
+.install-box code::before { content: "$ "; color: var(--mint); }
+.copy { flex: none; font: 600 13px var(--body); background: var(--mint); color: var(--night); border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 36px; }
+.install small { display: block; margin-top: 10px; color: var(--muted); font-size: 13px; }
+.install small a { color: var(--cream); }
+
 </style>
 
 <header class="nav">
@@ -215,19 +226,23 @@ footer a { color: var(--cream); }
       <a href="#harnesses">Harnesses</a>
       <a href="#faq">FAQ</a>
     </nav>
-    <a class="nav-cta" href="#tour">Watch the tour</a>
+    <a class="nav-cta" href="#install">Install</a>
   </div>
 </header>
 
 <main id="top">
   <div class="wrap hero">
     <div>
-      <div class="pixel">Powered by Laya · Runs on your Mac</div>
+      <div class="pixel">Free &amp; open source · Runs on your Mac</div>
       <h1>Your coding agents, <em>in your pocket.</em></h1>
       <p class="lede">Shed connects your phone to the Claude Code, Codex, Gemini, OpenCode and Pi sessions on your Mac. Send a message from anywhere. It runs in a real Terminal window on the Mac, where you can watch it work and approve its next step.</p>
+      <div class="install" id="install">
+        <div class="install-box"><code data-install>curl -fsSL https://shed-sigma.vercel.app/install.sh | sh</code><button class="copy" type="button" data-copy>Copy</button></div>
+        <small>macOS · installs to <code>~/.shed</code> · MIT licensed · <a href="https://github.com/IAmUnbounded/shed">Read the script and source on GitHub</a></small>
+      </div>
       <div class="hero-actions">
-        <a class="btn primary" href="#tour">Watch the 80-second tour ↓</a>
-        <a class="btn" href="#how">How it works</a>
+        <a class="btn" href="#tour">Watch the 80-second tour ↓</a>
+        <a class="btn" href="https://github.com/IAmUnbounded/shed">★ Star on GitHub</a>
       </div>
       <div class="harness-row" aria-label="Supported harnesses"><span>Claude Code</span><span>Codex</span><span>Gemini</span><span>OpenCode</span><span>Pi</span></div>
     </div>
@@ -360,6 +375,7 @@ footer a { color: var(--cream); }
         <details><summary>What happens when an agent asks for permission?</summary><p>Its pixel agent switches to "Needs your OK" and moves to the front. Open the Terminal tab and tap 1, 2 or 3, the same answer you would type at the Mac.</p></details>
         <details><summary>Can Shed start new sessions, or only continue old ones?</summary><p>Both. Send a message with no session and Shed opens a new Terminal window for the harness Laya picks, in a project you choose.</p></details>
         <details><summary>What does Laya do?</summary><p>Laya is an open-source decision model that runs locally. It picks the harness and model for new work, and decides whether a follow-up should stay in its session or move to a better-suited agent.</p></details>
+        <details><summary>Is it safe to pipe the installer into sh?</summary><p>Read it first: it is about 120 lines and lives in the open repo. It clones Shed into <code>~/.shed/app</code>, installs Node and cloudflared with Homebrew if missing, and adds two launch agents. Uninstall with <code>sh -s -- --uninstall</code>.</p></details>
         <details><summary>Does the Mac have to stay on?</summary><p>Yes. The agents run on your Mac, so it needs to be awake and online. Shed starts automatically when you sign in.</p></details>
       </div>
     </div>
@@ -369,17 +385,24 @@ footer a { color: var(--cream); }
     <svg class="sprite" data-sprite="shed" viewBox="0 0 20 20" aria-hidden="true"></svg>
     <h2>Your desk, in your pocket.</h2>
     <p class="lede">Shed runs on your Mac and works with the coding agents you already have.</p>
-    <a class="btn primary" href="#tour">Watch the tour</a>
+    <div class="install" style="margin-inline:auto;width:100%"><div class="install-box"><code data-install>curl -fsSL https://shed-sigma.vercel.app/install.sh | sh</code><button class="copy" type="button" data-copy>Copy</button></div></div>
   </div>
 </main>
 
 <footer>
   <div class="wrap">
     <span>Shed · powered by <a href="https://github.com/NandhaKishorM/laya">Laya</a>, the open-source decision model, via <a href="https://github.com/receptron/laya">@receptron/laya</a></span>
-    <span>Runs on macOS with Terminal.app</span>
+    <span><a href="https://github.com/IAmUnbounded/shed">GitHub</a> · MIT licence · Runs on macOS with Terminal.app</span>
   </div>
 </footer>
 
+<script>
+document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
+  const text = button.parentElement.querySelector('[data-install]').textContent;
+  try { await navigator.clipboard.writeText(text); button.textContent = 'Copied'; } catch { button.textContent = 'Select it'; }
+  setTimeout(() => { button.textContent = 'Copy'; }, 1800);
+}));
+</script>
 <script>
 // Pixel sprites shared with the Shed app: rows of single-letter colors, '.' is empty.
 const SPRITES = {
