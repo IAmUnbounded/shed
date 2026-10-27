@@ -212,6 +212,41 @@ function groupFor(pid, info) {
   const leader = processInfo(info.pgid);
   return leader && !SHELLS.has(leader.command) ? -info.pgid : pid;
 }
+// True when only shells are left in the tab (the agent has exited), so typing goes to the shell and closing loses nothing.
+export function onlyShellsOnTty(tty) {
+  if (!/^\/dev\/ttys\d+$/.test(tty)) return false;
+  const result = spawnSync('/bin/ps', ['-t', tty.replace('/dev/', ''), '-o', 'comm='], { encoding:'utf8', timeout:2000 });
+  const names = (result.stdout || '').split('\n').map(line => path.basename(line.trim())).filter(Boolean);
+  return names.length > 0 && names.every(name => SHELLS.has(name));
+}
+// Closes a tab whose agent has ended: the shell is told to exit, then a window left holding only that finished tab is
+// closed. A window with other tabs keeps them; the finished tab stays (or Terminal closes it, depending on the profile).
+export async function closeTerminalTab(tty) {
+  if (!onlyShellsOnTty(tty)) return { closed:false, reason:'busy' };
+  await typeIntoTerminalAsync(tty, 'exit');
+  await pause(1500);
+  const result = await osascriptAsync(`on run argv
+  set found to false
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if tty of t is (item 1 of argv) then set found to true
+      end repeat
+      if (count of tabs of w) is 1 then
+        set t to tab 1 of w
+        if tty of t is (item 1 of argv) and (count of processes of t) is 0 then
+          close w
+          return "closed"
+        end if
+      end if
+    end repeat
+  end tell
+  if found then return "left"
+  return "closed"
+end run`, [tty]);
+  // "closed" also covers a profile that closes the tab by itself once its shell exits.
+  return { closed:result === 'closed', reason:result === 'closed' ? '' : 'other-tabs' };
+}
 export async function stopAgent(pid, command, { graceMs = 5000 } = {}) {
   const names = Array.isArray(command) ? command : [command];
   const owned = () => { const info = processInfo(pid); return info && names.includes(info.command) ? info : null; };

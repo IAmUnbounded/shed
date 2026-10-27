@@ -71,7 +71,7 @@ async function showAuth() {
   } catch {}
 }
 function hideAuth() { $('#auth-screen').classList.add('hidden'); }
-function setView(view) { state.view = view; $('#phone-message').classList.toggle('hidden', view !== 'inbox'); $$('.view').forEach(el => el.classList.toggle('hidden', el.id !== `view-${view}`)); $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('#page-name').textContent = ({ inbox:'Command center', sessions:'Sessions', activity:'Activity', settings:'Settings' })[view]; const url = new URL(location.href); if (view === 'inbox') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.replaceState(null, '', url); document.querySelector('.sidebar').classList.remove('open'); $('#mobile-scrim').classList.add('hidden'); render(); }
+function setView(view) { state.view = view; if (view === 'settings') { loadShareSettings(); prepareShareLink(); loadAutoClose(); } $('#phone-message').classList.toggle('hidden', view !== 'inbox'); $$('.view').forEach(el => el.classList.toggle('hidden', el.id !== `view-${view}`)); $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('#page-name').textContent = ({ inbox:'Command center', sessions:'Sessions', activity:'Activity', settings:'Settings' })[view]; const url = new URL(location.href); if (view === 'inbox') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.replaceState(null, '', url); document.querySelector('.sidebar').classList.remove('open'); $('#mobile-scrim').classList.add('hidden'); render(); }
 function renderHarnesses() {
   const names = { codex:'Codex', claude:'Claude Code', gemini:'Gemini', pi:'Pi', opencode:'OpenCode' };
   const labels = { ready:'READY', needs_auth:'SIGN IN', offline:'OFFLINE', unknown:'CHECK', checking:'CHECKING' };
@@ -142,10 +142,11 @@ function renderModelChoices() {
     const openCodex = target === 'codex' && session.harness === 'codex' && session.liveState !== 'history' && !session.tty;
     const keepsModel = ['claude', 'codex'].includes(target) && target === session.harness && Boolean(session.tty);
     const current = keepsModel ? `Keep session model${session.currentModel ? ` · ${session.currentModel}` : ''}` : session.currentModel ? `Laya chooses · now ${session.currentModel}` : 'Laya chooses';
-    const liveTerminal = keepsModel && Boolean(session.tty);
-    setOptions(followup, openCodex || liveTerminal ? `<option value="">${liveTerminal ? escapeHtml(current) : 'Current session model'}</option>` : `<option value="">✦ ${escapeHtml(current)}</option>` + modelOptions(target));
+    // An open Claude terminal can switch models (Shed types /model first); an open Codex terminal keeps its own.
+    const liveTerminal = keepsModel && Boolean(session.tty), switchable = liveTerminal && target === 'claude';
+    setOptions(followup, openCodex || liveTerminal ? `<option value="">${liveTerminal ? escapeHtml(current) : 'Current session model'}</option>${switchable ? modelOptions(target).replace(/<option value="([^"]*)">([^<]*)</g, '<option value="$1">Switch to $2<') : ''}` : `<option value="">✦ ${escapeHtml(current)}</option>` + modelOptions(target));
     followup.value = [...followup.options].some(option => option.value === previous) ? previous : '';
-    followup.disabled = openCodex || liveTerminal;
+    followup.disabled = openCodex || (liveTerminal && !switchable);
   }
 }
 function setEditorHarness(harness) {
@@ -174,7 +175,15 @@ const PERMISSIONS = {
   plan:['PLAN', 'Plan mode: plans only, changes nothing'],
   ask:['', 'Asks before acting'],
 };
+// An open Claude session gets a picker: Shed presses Shift+Tab in its Terminal until Claude shows the chosen mode.
+const PICKABLE = [['ask', 'Ask before acting'], ['edits', 'Accept edits, ask before commands'], ['plan', 'Plan only, change nothing'], ['auto', 'Auto: checks risky actions itself']];
 function permissionLine(session) {
+  if (session.harness === 'claude' && session.tty) {
+    const current = session.permissions || 'ask';
+    const options = PICKABLE.map(([id, text]) => `<option value="${id}"${id === current ? ' selected' : ''}>${text}</option>`).join('')
+      + (current === 'skip' ? '<option value="skip" selected disabled>Skipping permissions (set when it started)</option>' : '');
+    return `<label class="permission-pick ${escapeHtml(current)}">Permissions <select id="permission-select" data-session="${escapeHtml(session.id)}" aria-label="Permission mode">${options}</select></label>`;
+  }
   const mode = PERMISSIONS[session.permissions];
   if (!mode || !['claude', 'codex'].includes(session.harness)) return '';
   const howTo = session.tty && session.harness === 'claude' ? ' · Mode on the Terminal tab switches modes' : '';
@@ -286,12 +295,67 @@ function agentSvg(harness, mood) {
   </svg>`;
 }
 const agentMoods = { working:['working', 'Typing away'], asking:['asking', 'Needs your OK'], open:['open', 'Waiting for you'] };
+// Sessions talking to each other (an agent ran `shed ask`, or you introduced them in the drawer).
+const TALKERS = ['claude', 'codex'];
+const MESSAGE_MARK = 'Message from another agent session, sent through Shed. It is the ';
+const talkOpen = x => ['sending', 'waiting'].includes(x.status);
+function sessionName(id) { const s = state.sessions.find(x => x.id === id); return s ? `${harnessNames[s.harness] || s.harness} · ${projectName(s.cwd)}` : 'a closed session'; }
+function talkBadge(session) {
+  const x = (state.exchanges || []).find(e => e.kind === 'ask' && talkOpen(e) && (e.from === session.id || e.to === session.id));
+  if (!x) return '';
+  const other = sessionName(x.from === session.id ? x.to : x.from);
+  return `<span class="agent-talk" title="${escapeHtml(x.message)}">↔ ${x.from === session.id ? 'asking' : 'answering'} ${escapeHtml(other)}</span>`;
+}
+function talkRow(x, here = '') {
+  const end = id => { const s = state.sessions.find(v => v.id === id); return `<span class="talk-end">${s ? symbol(s.harness) : ''}<b>${escapeHtml(s ? projectName(s.cwd) : 'closed')}</b></span>`; };
+  const intro = x.kind === 'intro';
+  const state_ = x.status === 'answered' ? (intro ? 'introduced' : 'answered') : x.status === 'failed' ? 'did not arrive' : intro ? 'introducing' : x.status === 'sending' ? 'sending' : 'waiting for a reply';
+  const said = intro ? (x.message ? `You: ${x.message}` : 'You introduced them.') : x.message;
+  const reply = !intro && x.reply ? `<div class="talk-reply">↳ ${escapeHtml(x.reply)}</div>` : x.error ? `<div class="talk-reply failed">${escapeHtml(x.error)}</div>` : '';
+  const open = here ? (x.from === here ? x.to : x.from) : intro ? x.from : x.to;
+  return `<button class="talk-row ${talkOpen(x) ? 'is-open' : ''}" data-session="${escapeHtml(open)}" type="button"><div class="talk-ends">${end(x.from)}<span class="talk-arrow">${intro ? '⇄' : '→'}</span>${end(x.to)}<span class="talk-state ${escapeHtml(x.status)}">${escapeHtml(state_)}</span><span class="time">${relative(x.createdAt)}</span></div><div class="talk-said">${escapeHtml(said)}</div>${reply}</button>`;
+}
+function renderTalk() {
+  const recent = (state.exchanges || []).filter(x => talkOpen(x) || Date.now() - Date.parse(x.createdAt) < 86400000).slice(0, 5);
+  const html = recent.length ? `<div class="talk-head"><h3>Between sessions</h3><p>Your agents asking each other things.</p></div>${recent.map(x => talkRow(x)).join('')}` : '';
+  const print = fingerprint(html);
+  const box = $('#session-talk');
+  if (box.dataset.print !== print) { box.innerHTML = html; box.dataset.print = print; box.classList.toggle('hidden', !html); }
+}
+// A message another agent sent is shown as coming from that agent, without Shed's delivery instructions around it.
+function agentMessage(text) {
+  text = text.replace(/<\/?pasted_content[^>]*>/g, '').trim(); // Claude records long pastes wrapped in this tag
+  if (!text.startsWith(MESSAGE_MARK)) return null;
+  const match = text.slice(MESSAGE_MARK.length).match(/^(.+?):\n\n([\s\S]*?)(?:\n\nAnswer in your normal reply[\s\S]*)?$/);
+  const who = match?.[1].match(/^(\S+) session working on (.+?) \(/);
+  return match ? { from:who ? `${who[1]} · ${who[2]}` : match[1], text:match[2] } : null;
+}
+function messageHtml(m, session) {
+  const relayed = m.role === 'user' ? agentMessage(m.text) : null;
+  if (relayed) return `<div class="message user relayed"><div class="message-label">↔ FROM ${escapeHtml(relayed.from.toUpperCase())} ${m.at ? '· ' + relative(m.at) : ''}</div><div class="message-body">${escapeHtml(relayed.text)}</div></div>`;
+  return `<div class="message ${escapeHtml(m.role)}"><div class="message-label">${m.role === 'user' ? 'YOU' : escapeHtml(session.harness.toUpperCase())} ${m.at ? '· ' + relative(m.at) : ''}</div>${m.role === 'user' ? `<div class="message-body">${escapeHtml(m.text)}</div>` : `<div class="message-body md">${renderMarkdown(m.text)}</div>${fileChips(m.text)}`}</div>`;
+}
+function sessionTalk(session) {
+  const mine = (state.exchanges || []).filter(x => x.from === session.id || x.to === session.id).slice(0, 4);
+  const others = state.sessions.filter(s => s.id !== session.id && s.liveState !== 'history' && TALKERS.includes(s.harness));
+  const canTalk = session.liveState !== 'history' && TALKERS.includes(session.harness) && others.length;
+  if (!mine.length && !canTalk) return '';
+  return `<div class="session-talk">${mine.map(x => talkRow(x, session.id)).join('')}${canTalk ? '<button class="text-action" id="open-talk" type="button">↔ Talk to another session</button>' : ''}</div>`;
+}
+function openTalk() {
+  const session = state.selectedSession;
+  if (!session) return;
+  const others = state.sessions.filter(s => s.id !== session.id && s.liveState !== 'history' && TALKERS.includes(s.harness));
+  $('#talk-lead').textContent = `From ${sessionName(session.id)}: ${session.title}`;
+  $('#talk-target').innerHTML = others.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(`${sessionName(s.id)} — ${s.title.slice(0, 60)}`)}</option>`).join('');
+  $('#talk-dialog').showModal();
+}
 function agentCard(session, index) {
   const [mood, status] = agentMoods[session.liveState] || agentMoods.open;
   return `<button class="agent ${mood}" data-session="${escapeHtml(session.id)}" style="--d:${(index * 0.83) % 4}s" aria-label="${escapeHtml(`${harnessNames[session.harness] || session.harness} in ${projectName(session.cwd) || 'a project'}: ${status}. ${session.title}`)}">
     <span class="agent-stage"><span class="agent-harness">${escapeHtml(harnessNames[session.harness] || session.harness)}</span>${agentSvg(session.harness, mood)}</span>
     <span class="agent-name">${escapeHtml(projectName(session.cwd) || 'Untitled project')}</span>
-    <span class="agent-status"><i></i>${status}</span>
+    <span class="agent-status"><i></i>${status}</span>${talkBadge(session)}
     <span class="agent-title">${escapeHtml(session.title)}</span>
   </button>`;
 }
@@ -303,6 +367,7 @@ function render() {
   const desk = live.length ? live.map(agentCard).join('') : `<div class="agent-empty">${agentSvg('pi', 'open')}<div><strong>No agents at their desks</strong><p>Start a session from the sidebar's + and it will show up here.</p></div></div>`;
   const deskPrint = fingerprint(desk);
   if ($('#active-sessions').dataset.print !== deskPrint) { $('#active-sessions').innerHTML = desk; $('#active-sessions').dataset.print = deskPrint; } // rebuilding every refresh would restart the animations
+  renderTalk();
   $('#recent-sessions').innerHTML = state.sessions.filter(s => s.liveState === 'history').slice(0,6).map(sessionRow).join('') || '<div class="table-empty">No previous desktop sessions found yet.</div>';
   // The Sessions and Activity lists are long; build them only while they are on screen.
   if (state.view !== 'sessions') { if ($('#all-sessions').firstChild) $('#all-sessions').replaceChildren(); }
@@ -322,7 +387,7 @@ function renderSessionList() {
 function renderActivity() {
   $('#activity-list').innerHTML = state.tasks.length ? state.tasks.map(t => `<div class="activity-item" data-task="${escapeHtml(t.id)}">${symbol(t.harness)}<div class="activity-main"><strong>${escapeHtml(t.title)}</strong><small>${escapeHtml(projectName(t.cwd))} · ${escapeHtml(t.model || 'default model')} (${escapeHtml(t.modelSource || 'harness-default')}) · ${escapeHtml(t.routeSource || 'local')} route · ${relative(t.createdAt)}</small></div><span class="badge ${escapeHtml(t.status)}">${escapeHtml(t.status)}</span></div>`).join('') : '<div class="empty-panel"><span class="empty-symbol">◷</span><div><strong>No tasks yet</strong><p>Sessions you start through Shed will appear here.</p></div></div>';
 }
-async function refresh() { if (document.hidden) return; try { const [s,t] = await Promise.all([api(`/api/sessions?v=${state.v.sessions || ''}`), api(`/api/tasks?v=${state.v.tasks || ''}`)]); let changed = false; if (!s.same) { state.sessions = s.sessions; state.v.sessions = s.v; changed = true; } if (!t.same) { state.tasks = t.tasks; state.v.tasks = t.v; changed = true; } if (changed) { renderProjects(); render(); } if (state.selectedTask) openTask(state.selectedTask, true); if (state.selectedSession) openSession(state.selectedSession.id, true); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
+async function refresh() { if (document.hidden) return; try { const [s,t] = await Promise.all([api(`/api/sessions?v=${state.v.sessions || ''}`), api(`/api/tasks?v=${state.v.tasks || ''}`)]); let changed = false; if (!s.same) { state.sessions = s.sessions; state.v.sessions = s.v; changed = true; } if (!t.same) { state.tasks = t.tasks; state.exchanges = t.exchanges || []; state.v.tasks = t.v; changed = true; } if (changed) { renderProjects(); render(); } if (state.selectedTask) openTask(state.selectedTask, true); if (state.selectedSession) openSession(state.selectedSession.id, true); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
 // Live status: the Mac pushes Typing / Waiting / Needs your OK changes as they happen, so agent cards and the open
 // chat's header update at once instead of on the next poll. The 5-second poll stays as a fallback.
 function connectEvents() {
@@ -339,6 +404,7 @@ function connectEvents() {
     if (changed) render();
   });
   events.addEventListener('sessions', () => refresh());
+  events.addEventListener('exchanges', () => refresh());
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && $('#auth-screen').classList.contains('hidden')) { connectEvents(); refresh(); loadTerminal(); } });
 async function init() { try { const me = await api('/api/me'); Object.assign(state, me); hideAuth(); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); await Promise.all([refresh(), loadModels(), refreshHarnessHealth(), loadConnect()]); setupPush(); loadDevices(); loadPro(); connectEvents(); openFromUrl(location.href); $('#phone-message').classList.toggle('hidden', state.view !== 'inbox'); const requestedView = new URL(location.href).searchParams.get('view'); if (['sessions','activity','settings'].includes(requestedView)) setView(requestedView); } catch (error) { if (error.message === 'Authentication required.') showAuth(); else showFeedback(error.message); } }
@@ -395,16 +461,13 @@ $('#approve-no').addEventListener('click', () => deviceAction($('#approve-toast'
 async function loadPro() {
   let pro;
   try { pro = await api('/api/pro'); } catch { return; }
-  $('#pro-badge').textContent = pro.active ? 'PRO' : 'FREE';
-  $('#pro-buy').href = pro.buyUrl;
   $('#pro-suffix').textContent = pro.domain ? `.${pro.domain}` : '';
-  $('#pro-buy').classList.toggle('hidden', pro.active);
   $('#pro-form').classList.toggle('hidden', pro.active || !pro.canChange);
   $('#pro-deactivate').classList.toggle('hidden', !pro.active || !pro.canChange);
   $('#pro-copy').innerHTML = pro.active
     ? `Your permanent address is <b>${escapeHtml(pro.url)}</b>. Open it on your phone and add it to your Home Screen; it will not change.`
-    : pro.canChange ? 'Get a permanent address, so the link on your phone and its notifications never break when the tunnel restarts. Paste your licence key and pick a name.'
-    : 'Get a permanent address, so the link on your phone and its notifications never break when the tunnel restarts. Turn it on from Shed on your Mac.';
+    : pro.canChange ? 'Have a Shed Pro licence key? Paste it and pick a name to give this Mac a permanent address, so the link on your phone and its notifications never break when the tunnel restarts.'
+    : 'With a Shed Pro licence key, this Mac can have a permanent address that never changes. Turn it on from Shed on the Mac.';
   $('#remote-note').textContent = pro.active ? 'On the same Wi-Fi, you can also use:' : 'This temporary link changes when the tunnel restarts. On the same Wi-Fi, you can also use:';
 }
 function proFeedback(message) { const el = $('#pro-feedback'); el.textContent = message; el.classList.remove('hidden'); }
@@ -426,6 +489,72 @@ $('#pro-deactivate').addEventListener('click', async () => {
 });
 $('#revoke-others').addEventListener('click', async () => { try { await api('/api/devices/revoke-others', { method:'POST' }); loadDevices(); } catch (error) { showFeedback(error.message); } });
 setInterval(() => { if ($('#auth-screen').classList.contains('hidden') && (state.local || state.view === 'settings')) loadDevices(); }, 5000);
+// Share from iPhone: the Shortcut download, which browser's login to borrow for private posts, and the Shortcuts in use.
+async function loadShareSettings() {
+  try {
+    const { keys, cookiesBrowser, browsers, base } = await api('/api/share/settings');
+    const names = { '':'None (public posts only)', chrome:'Chrome', safari:'Safari', firefox:'Firefox', brave:'Brave', edge:'Edge', arc:'Arc', vivaldi:'Vivaldi', opera:'Opera', chromium:'Chromium' };
+    setOptions($('#share-browser'), browsers.map(b => `<option value="${b}">${names[b] || b}</option>`).join(''));
+    $('#share-browser').value = cookiesBrowser;
+    $('#share-status').textContent = base ? `The Shortcut sends to ${base.replace(/^https?:\/\//, '')}. If that address changes, get the Shortcut again.` : 'Shed has no address your phone can reach yet, so the Shortcut cannot be made.';
+    $('#share-get').disabled = !base;
+    $('#share-mac').classList.toggle('hidden', !state.local || !base);
+    $('#share-keys').innerHTML = keys.map(k => `<div class="device-row"><div><b>${escapeHtml(k.name)}</b><small>${k.uses ? `${k.uses} share${k.uses === 1 ? '' : 's'} · last ${relative(k.lastUsedAt)}` : 'Not used yet'} · added ${relative(k.createdAt)}</small></div><div class="device-actions"><button class="text-action" type="button" data-share-revoke="${escapeHtml(k.id)}">Turn off</button></div></div>`).join('');
+  } catch {}
+}
+// On a phone the one-time link is fetched ahead of time, so a tap opens it at once: Safari blocks a window opened after
+// waiting on the network, and the Home Screen app can't hand files to the Shortcuts app itself.
+const onPhone = /iPhone|iPad|iPod/.test(navigator.userAgent);
+let shareLink = null;
+async function prepareShareLink() {
+  if (!onPhone || state.view !== 'settings') return;
+  try { const { url } = await api('/api/share/shortcut', { method:'POST' }); shareLink = { url, at:Date.now() }; } catch { shareLink = null; }
+}
+setInterval(() => { if (onPhone && state.view === 'settings' && !document.hidden && (!shareLink || Date.now() - shareLink.at > 4 * 60 * 1000)) prepareShareLink(); }, 20000);
+$('#share-get').addEventListener('click', async () => {
+  if (onPhone) {
+    $('#share-phone').classList.remove('hidden');
+    if (!shareLink || Date.now() - shareLink.at > 4.5 * 60 * 1000) prepareShareLink();
+    return;
+  }
+  try {
+    const { qr } = await api('/api/share/shortcut', { method:'POST' });
+    $('#share-qr-code').innerHTML = qr; $('#share-qr').classList.remove('hidden'); setTimeout(() => $('#share-qr').classList.add('hidden'), 5 * 60 * 1000);
+    setTimeout(loadShareSettings, 4000);
+  } catch (error) { showFeedback(error.message); }
+});
+// Copying needs the tap itself, so the link and the hand-built key are fetched before the copy buttons are used.
+async function copyText(text, done) {
+  try { await navigator.clipboard.writeText(text); showFeedback(done); }
+  catch { prompt('Copy this:', text); }
+}
+$('#share-copy-link').addEventListener('click', () => {
+  if (!shareLink || Date.now() - shareLink.at > 4.5 * 60 * 1000) { showFeedback('Getting a fresh link. Tap again in a second.'); return prepareShareLink(); }
+  copyText(shareLink.url, 'Link copied. Now open Safari and paste it into the address bar.');
+  shareLink = null; setTimeout(prepareShareLink, 1500); setTimeout(loadShareSettings, 60000);
+});
+let manualKey = null;
+$('.share-manual').addEventListener('toggle', async e => {
+  if (!e.target.open || manualKey) return;
+  try { manualKey = await api('/api/share/manual-key', { method:'POST' }); loadShareSettings(); } catch (error) { showFeedback(error.message); }
+});
+$('#share-copy-url').addEventListener('click', () => manualKey ? copyText(manualKey.url, 'Address copied. Paste it into Get Contents of URL.') : showFeedback('One moment, getting your key…'));
+$('#share-copy-key').addEventListener('click', () => manualKey ? copyText(manualKey.header, 'Key copied. Paste it as the Authorization value.') : showFeedback('One moment, getting your key…'));
+$('#followup-permissions').addEventListener('change', async e => {
+  const select = e.target.closest('#permission-select');
+  if (!select) return;
+  select.disabled = true; showFeedback('Switching Claude\'s mode in its Terminal…');
+  try { const { mode } = await api(`/api/sessions/${encodeURIComponent(select.dataset.session)}/permissions`, { method:'POST', body:JSON.stringify({ mode:select.value }) }); showFeedback(`Now: ${PICKABLE.find(([id]) => id === mode)?.[1] || mode}.`); }
+  catch (error) { showFeedback(error.message); }
+  select.disabled = false; select.blur(); $('#followup-permissions').dataset.line = '';
+  if (state.selectedSession) openSession(state.selectedSession.id, true);
+});
+$('#share-mac').addEventListener('click', async () => {
+  try { await api('/api/share/install-on-mac', { method:'POST' }); showFeedback('Check the Mac: click Add Shortcut. It shows up on your iPhone within a minute.'); setTimeout(loadShareSettings, 3000); }
+  catch (error) { showFeedback(error.message); }
+});
+$('#share-browser').addEventListener('change', async e => { try { await api('/api/share/settings', { method:'POST', body:JSON.stringify({ cookiesBrowser:e.target.value }) }); showFeedback(e.target.value ? 'Shed will use that browser\'s login for posts that need one. macOS may ask you to allow it once.' : 'Shed will only fetch public posts.'); } catch (error) { showFeedback(error.message); } });
+$('#share-keys').addEventListener('click', async e => { const b = e.target.closest('[data-share-revoke]'); if (!b) return; try { await api(`/api/share/keys/${encodeURIComponent(b.dataset.shareRevoke)}`, { method:'DELETE' }); loadShareSettings(); } catch (error) { showFeedback(error.message); } });
 // Notifications: Web Push through Shed's service worker. On iPhone this needs Shed on the Home Screen (iOS 16.4+).
 const push = { registration:null, supported:'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && window.isSecureContext };
 const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
@@ -480,6 +609,8 @@ $('#notify-test').addEventListener('click', async () => {
   await api('/api/push/subscribe', { method:'POST', body:JSON.stringify({ subscription:sub.toJSON(), label:isIOS ? 'iPhone' : 'Browser' }) }).catch(error => showFeedback(error.message));
 });
 ['notify-finished', 'notify-asking'].forEach(id => $(`#${id}`).addEventListener('change', () => api('/api/push/prefs', { method:'POST', body:JSON.stringify({ finished:$('#notify-finished').checked, asking:$('#notify-asking').checked }) }).catch(error => showFeedback(error.message))));
+async function loadAutoClose() { try { const { prefs } = await api('/api/autoclose'); $('#autoclose-enabled').checked = prefs.enabled; } catch { /* Settings still work without it. */ } }
+$('#autoclose-enabled').addEventListener('change', () => api('/api/autoclose', { method:'POST', body:JSON.stringify({ enabled:$('#autoclose-enabled').checked }) }).catch(error => showFeedback(error.message)));
 async function setupPush() {
   if ('serviceWorker' in navigator && window.isSecureContext) {
     try { push.registration = await navigator.serviceWorker.register('/sw.js'); } catch { push.supported = false; }
@@ -497,7 +628,7 @@ function openFromUrl(href) {
 const fileIcon = kind => ({ video:'▶', image:'▣', audio:'♪', application:'⇩', text:'≡' })[kind] || '⇩';
 const fileSize = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(0)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
 async function fetchFiles(base) {
-  try { const data = await api(`${base}/files`); state.files = { key:base, list:data.files || [], root:data.root }; }
+  try { const data = await api(`${base}/files`); state.files = { key:base, list:data.files || [], root:data.root, total:data.total || 0 }; }
   catch { state.files = { key:base, list:[] }; }
   return state.files;
 }
@@ -509,18 +640,30 @@ function fileChips(text) {
   const hits = list.filter(f => mentioned.has(f.path.split('/').pop().toLowerCase())).slice(0, 6);
   return hits.length ? `<div class="file-chips">${hits.map(f => `<a class="file-chip" href="${fileUrl(key, f.path, true)}" download title="Download ${escapeHtml(f.path)}"><span>${fileIcon(f.kind)}</span>${escapeHtml(f.path.split('/').pop())}<small>${fileSize(f.size)}</small></a>`).join('')}</div>` : '';
 }
+const FILES_SHOWN = 60;
 async function loadFiles() {
   const session = state.selectedSession, box = $('#drawer-files');
   if (!session) return;
   const base = `/api/sessions/${encodeURIComponent(session.id)}`;
   box.innerHTML = '<div class="files-empty">Looking for files in this project…</div>';
-  const { list, root } = await fetchFiles(base);
+  const { list, root, total } = await fetchFiles(base);
   if (state.selectedSession?.id !== session.id) return;
-  box.innerHTML = list.length
-    ? `<div class="files-head">Newest files in <b>${escapeHtml(root || projectName(session.cwd))}</b></div>${list.map((f, i) => `<div class="file-row" data-file-index="${i}"><button class="file-main" type="button" data-preview="${i}"><span class="file-icon ${escapeHtml(f.kind)}">${fileIcon(f.kind)}</span><span class="file-name"><b>${escapeHtml(f.path.split('/').pop())}</b><small>${escapeHtml(f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) + ' · ' : '')}${fileSize(f.size)} · ${relative(f.modifiedAt)}</small></span></button><a class="file-download" href="${fileUrl(base, f.path, true)}" download aria-label="Download ${escapeHtml(f.path)}">Download</a><div class="file-preview hidden"></div></div>`).join('')}`
-    : '<div class="files-empty">No videos, images, PDFs or other shareable files in this project yet.</div>';
+  state.filesView = { all:false, query:'' };
+  if (!list.length) { box.innerHTML = '<div class="files-empty">No videos, images, PDFs or other shareable files in this project yet.</div>'; return; }
+  box.innerHTML = `<div class="files-head">${list.length} file${list.length === 1 ? '' : 's'} in <b>${escapeHtml(root || projectName(session.cwd))}</b>, newest first${total > list.length ? ` (the ${list.length} newest of ${total})` : ''}</div>${list.length > FILES_SHOWN ? '<input class="files-filter" id="files-filter" type="search" placeholder="Find a file by name or folder…" autocomplete="off">' : ''}<div id="files-list"></div>`;
+  renderFileRows();
 }
+// Draws the rows: the newest few until asked for all, or every file whose path matches the filter.
+function renderFileRows() {
+  const { key:base, list } = state.files, { all, query } = state.filesView, q = query.trim().toLowerCase();
+  const matches = list.map((f, i) => [f, i]).filter(([f]) => !q || f.path.toLowerCase().includes(q));
+  const shown = all || q ? matches : matches.slice(0, FILES_SHOWN);
+  $('#files-list').innerHTML = (shown.length ? shown.map(([f, i]) => `<div class="file-row" data-file-index="${i}"><button class="file-main" type="button" data-preview="${i}"><span class="file-icon ${escapeHtml(f.kind)}">${fileIcon(f.kind)}</span><span class="file-name"><b>${escapeHtml(f.path.split('/').pop())}</b><small>${escapeHtml(f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) + ' · ' : '')}${fileSize(f.size)} · ${relative(f.modifiedAt)}</small></span></button><a class="file-download" href="${fileUrl(base, f.path, true)}" download aria-label="Download ${escapeHtml(f.path)}">Download</a><div class="file-preview hidden"></div></div>`).join('') : '<div class="files-empty">No file matches that.</div>')
+    + (shown.length < matches.length ? `<button class="pill files-more" type="button" id="files-show-all">Show all ${matches.length} files</button>` : '');
+}
+$('#drawer-files').addEventListener('input', e => { if (e.target.id === 'files-filter') { state.filesView.query = e.target.value; renderFileRows(); } });
 $('#drawer-files').addEventListener('click', e => {
+  if (e.target.closest('#files-show-all')) { state.filesView.all = true; return renderFileRows(); }
   const button = e.target.closest('[data-preview]');
   if (!button) return;
   const f = state.files.list[Number(button.dataset.preview)], row = button.closest('.file-row'), preview = row.querySelector('.file-preview');
@@ -618,8 +761,11 @@ async function openSession(id, silent = false) {
     renderModelChoices();
     const status = session.liveState === 'history' ? 'HISTORY' : session.liveState === 'working' ? 'WORKING NOW' : session.liveState === 'asking' ? 'NEEDS YOUR OK' : 'OPEN ON DESKTOP';
     $('#drawer-harness').innerHTML = `${symbol(session.harness)} <span style="vertical-align:middle;margin-left:7px">${escapeHtml(session.harness.toUpperCase())} · ${status}${permissionTag(session)}</span>`;
-    const permissions = $('#followup-permissions'); permissions.innerHTML = permissionLine(session); permissions.classList.toggle('hidden', !permissions.innerHTML);
-    const changed = setDrawerContent(`<header class="chat-head"><h2 class="drawer-title">${escapeHtml(projectName(session.cwd) || 'Untitled project')}</h2><p class="chat-topic" title="${escapeHtml(session.title)}">${escapeHtml(topicLine(session.title))}</p><div class="drawer-path">${escapeHtml(session.cwd || 'Unknown folder')} · updated ${relative(session.updatedAt)}</div></header>${messages.length ? messages.map(m => `<div class="message ${escapeHtml(m.role)}"><div class="message-label">${m.role === 'user' ? 'YOU' : escapeHtml(session.harness.toUpperCase())} ${m.at ? '· ' + relative(m.at) : ''}</div>${m.role === 'user' ? `<div class="message-body">${escapeHtml(m.text)}</div>` : `<div class="message-body md">${renderMarkdown(m.text)}</div>${fileChips(m.text)}`}</div>`).join('') : '<div class="table-empty">No messages found in this session record.</div>'}${pendingMessages(session, messages)}`, !silent);
+    const permissions = $('#followup-permissions'), line = permissionLine(session);
+    // Left alone while the picker is in use, so a refresh never closes it or undoes a pick in progress.
+    if (permissions.dataset.line !== line && !permissions.querySelector('select:focus, select:disabled')) { permissions.innerHTML = line; permissions.dataset.line = line; }
+    permissions.classList.toggle('hidden', !line);
+    const changed = setDrawerContent(`<header class="chat-head"><h2 class="drawer-title">${escapeHtml(projectName(session.cwd) || 'Untitled project')}</h2><p class="chat-topic" title="${escapeHtml(session.title)}">${escapeHtml(topicLine(session.title))}</p><div class="drawer-path">${escapeHtml(session.cwd || 'Unknown folder')} · updated ${relative(session.updatedAt)}</div>${sessionTalk(session)}</header>${messages.length ? messages.map(m => messageHtml(m, session)).join('') : '<div class="table-empty">No messages found in this session record.</div>'}${pendingMessages(session, messages)}`, !silent);
     if (silent) { if (changed) content.scrollTop = state.pinBottom || stickToBottom ? content.scrollHeight : priorScroll; }
     else { state.pinBottom = true; content.scrollTop = content.scrollHeight; }
     $('#drawer-tabs').classList.toggle('hidden', !session.tty && !session.cwd);
@@ -821,6 +967,25 @@ setInterval(() => { if (state.local && $('#auth-screen').classList.contains('hid
 $('#connect-phone').addEventListener('click', openConnect);
 $('#connect-card-more').addEventListener('click', openConnect);
 $('#connect-close').addEventListener('click', () => $('#connect-dialog').close());
+$('#talk-close').addEventListener('click', () => $('#talk-dialog').close());
+$('#talk-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const from = state.selectedSession, to = $('#talk-target').value, button = $('#talk-send');
+  if (!from || !to) return;
+  button.disabled = true;
+  try {
+    await api('/api/exchanges/introduce', { method:'POST', body:JSON.stringify({ from:from.id, to, note:$('#talk-note').value }) });
+    $('#talk-note').value = ''; $('#talk-dialog').close();
+    showFeedback(`Introduced. ${sessionName(from.id)} now knows how to reach ${sessionName(to)}.`);
+    await refresh();
+  } catch (error) { showFeedback(error.message); }
+  finally { button.disabled = false; }
+});
+document.addEventListener('click', e => {
+  if (e.target.id === 'open-talk') return openTalk();
+  const row = e.target.closest('.talk-row');
+  if (row?.dataset.session && state.sessions.some(s => s.id === row.dataset.session)) openSession(row.dataset.session);
+});
 $('#connect-dialog').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 // On a phone, the command center has a message bar: type and send, and Laya picks the agent.
 // The phone bar's agent picker mirrors the main composer's harness list (same readiness, "Auto" for Laya).
@@ -828,11 +993,20 @@ function syncPhoneHarness() {
   const source = $('#harness-select'), picker = $('#phone-harness'), current = picker.value || 'auto';
   setOptions(picker, [...source.options].map(o => `<option value="${escapeHtml(o.value)}"${o.disabled ? ' disabled' : ''}>${o.value === 'auto' ? '✦ Auto' : escapeHtml(o.textContent)}</option>`).join(''));
   picker.value = [...picker.options].some(o => o.value === current && !o.disabled) ? current : 'auto';
+  syncPhoneModel();
 }
+// The phone's model picker: shown once an agent is picked, listing that agent's models from Settings.
+function syncPhoneModel() {
+  const harness = $('#phone-harness').value, picker = $('#phone-model'), current = picker.value;
+  setOptions(picker, '<option value="">✦ Model</option>' + (harness === 'auto' ? '' : modelOptions(harness)));
+  picker.value = [...picker.options].some(o => o.value === current) ? current : '';
+  picker.classList.toggle('hidden', picker.options.length < 2);
+}
+$('#phone-harness').addEventListener('change', syncPhoneModel);
 async function sendPhoneMessage() {
   const box = $('#phone-message-input'), text = box.value;
   if (!text.trim() && !attached.phone.length) return;
-  $('#harness-select').value = $('#phone-harness').value; renderModelChoices();
+  $('#harness-select').value = $('#phone-harness').value; renderModelChoices(); $('#model-select').value = $('#phone-model').value;
   const project = $('#phone-project').value, workspace = $('#phone-workspace').value.trim();
   if (project === '__new__' && !workspace) { $('#phone-workspace').focus(); return showFeedback('Name the new workspace first.'); }
   $('#project-select').value = project; $('#new-workspace').value = project === '__new__' ? workspace : ''; toggleNewWorkspace();
@@ -907,6 +1081,9 @@ $('#model-rows').addEventListener('click', e => { const remove = e.target.closes
 $('#add-model').addEventListener('click', () => { if (modelState.draft.models.length >= 16) return; modelState.draft.models.push({id:'',label:'',description:'',enabled:true}); renderModelEditor(); $('#model-rows .model-row:last-child input[data-field="id"]')?.focus(); });
 $('#default-model').addEventListener('change', e => { modelState.draft.defaultModel = e.target.value; });
 $('#save-models').addEventListener('click', async () => { const el = $('#models-feedback'), harness = $('#model-editor-harness').value; try { const { config } = await api('/api/models', { method:'POST', body:JSON.stringify({ harness, ...modelState.draft }) }); modelState.configs[harness] = config; setEditorHarness(harness); renderModelChoices(); el.textContent = `Saved ${config.models.filter(model => model.enabled).length} enabled models for ${harness}. Laya will choose among them when this harness is routed.`; el.classList.remove('hidden'); } catch (error) { el.textContent = error.message; el.classList.remove('hidden'); } });
+function setDrawerExpanded(on) { $('#detail-drawer').classList.toggle('expanded', on); const b = $('#expand-drawer'); b.textContent = on ? '⤡' : '⤢'; b.title = b.ariaLabel = on ? 'Shrink panel' : 'Expand panel'; b.setAttribute('aria-pressed', String(on)); try { localStorage.setItem('drawerExpanded', on ? '1' : ''); } catch {} }
+try { setDrawerExpanded(localStorage.getItem('drawerExpanded') === '1'); } catch {}
+$('#expand-drawer').addEventListener('click', () => setDrawerExpanded(!$('#detail-drawer').classList.contains('expanded')));
 $('#close-drawer').addEventListener('click', closeDrawer); $('#drawer-backdrop').addEventListener('click', closeDrawer);
 $('#menu-button').addEventListener('click', () => { $('.sidebar').classList.add('open'); $('#mobile-scrim').classList.remove('hidden'); });
 $('#mobile-scrim').addEventListener('click', () => { $('.sidebar').classList.remove('open'); $('#mobile-scrim').classList.add('hidden'); });

@@ -7,8 +7,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript } from './sessions.js';
-import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState } from './live.js';
-import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent } from './terminal.js';
+import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState, footerMode } from './live.js';
+import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent, closeTerminalTab, ttyOf } from './terminal.js';
+import { autoClosePrefs, idleSessions } from './idle.js';
+import { exchangeStore, exchangeSummary, refusal, depthFor, messagePrompt, introductionPrompt, describe } from './exchanges.js';
 import { rankSessions } from './router.js';
 import { decideRoute, decideFollowup, decideModel, probeLaya, getLaya, layaStatus } from './laya.js';
 import { harnesses, modelConfig, validateModelConfig } from './models.js';
@@ -19,6 +21,7 @@ import { proStore } from './pro.js';
 import { interruptCodexThread } from './codex-app.js';
 import { uploadStore, attachmentNote, UPLOAD_ID } from './uploads.js';
 import { parseMenu, keysToChoose } from './menu.js';
+import { extractUrl, fetchShared, sharePrompt, signedShortcut } from './share.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
@@ -45,6 +48,11 @@ initPush(dataDir);
 const pro = proStore(dataDir, { port });
 const uploads = uploadStore(dataDir);
 const attempts = new Map();
+const exchanges = exchangeStore(dataDir);
+// The `shed` command agents run (bin/shed) finds Shed through agent.json: this port and a key that only works from this Mac.
+const agentKey = crypto.randomBytes(24).toString('base64url');
+fs.writeFileSync(path.join(dataDir, 'agent.json'), JSON.stringify({ port, key:agentKey }), { mode:0o600 });
+const shedCli = (cli => /^[\w./-]+$/.test(cli) ? cli : `'${cli.replace(/'/g, `'\\''`)}'`)(path.join(root, 'bin', 'shed'));
 
 function getToken() {
   if (fs.existsSync(tokenFile)) return fs.readFileSync(tokenFile, 'utf8').trim();
@@ -296,6 +304,7 @@ const notifyPrefs = () => ({ finished:true, asking:true, ...(settings.notify || 
 function firstLine(text) { return String(text || '').replace(/[#*`>_]/g, '').split('\n').map(l => l.trim()).find(Boolean)?.slice(0, 140) || ''; }
 async function watchAndNotify() {
   try { refreshQueuedTasks(); } catch (error) { console.error(`Task refresh failed: ${error.message}`); }
+  syncExchanges();
   const statuses = new Map(tasks.map(t => [t.id, t.status]));
   const asking = new Set(sessions().filter(s => s.liveState === 'asking').map(s => s.id));
   const first = !seen.tasks;
@@ -304,7 +313,7 @@ async function watchAndNotify() {
     for (const task of tasks) {
       // A task created since the last check counts as running, so one that finishes within a single interval still notifies.
       const before = seen.tasks.get(task.id) ?? (Date.parse(task.createdAt) >= seen.at ? 'running' : undefined);
-      if (!['running', 'queued'].includes(before) || !['completed', 'failed'].includes(task.status) || !prefs.finished) continue;
+      if (!['running', 'queued'].includes(before) || !['completed', 'failed'].includes(task.status) || !prefs.finished || task.exchangeKind === 'ask') continue;
       const done = task.status === 'completed';
       notify({ title:`${label[task.harness] || task.harness} ${done ? 'finished' : 'stopped'}: ${task.title}`, body:done ? firstLine(task.output) || 'Tap to see the reply.' : firstLine(task.error) || 'Tap to see what happened.', url:`/?task=${encodeURIComponent(task.id)}`, tag:`task-${task.id}` }).catch(() => {});
     }
@@ -332,6 +341,9 @@ function refreshQueuedTasks() {
   }
   if (changed) saveTasks();
 }
+// A model picked for an open Claude terminal: only an enabled model from Settings, and only a name safe to type after /model.
+const terminalModel = id => typeof id === 'string' && /^[\w.\-\[\]]{1,80}$/.test(id) ? modelConfig('claude', settings.modelRouting).models.find(m => m.enabled && m.id === id) : null;
+
 // Shared by sending and the drawer preview, so the preview shows exactly what a send would do.
 async function planTask(input) {
   let { route, cwd, healthyHarnesses, health } = await routeInput(input);
@@ -348,6 +360,8 @@ async function planTask(input) {
   const selectedHarness = route.session?.harness || route.harness;
   const model = selectedHarness === 'codex' && route.session?.liveState !== 'history' && route.session && !route.session.tty
     ? { model:'', reason:'The open Codex session keeps its current model.', source:'session' }
+    : selectedHarness === 'claude' && route.session?.tty && terminalModel(input.model)
+    ? { model:input.model, reason:`Switches the open terminal to ${terminalModel(input.model).label || input.model} with /model, then types your message.`, source:'selected' }
     : ['claude', 'codex'].includes(selectedHarness) && route.session?.tty
     ? { model:'', reason:'Typed into the open terminal, so the session keeps its own model and permissions.', source:'session' }
     : await decideModel(input.prompt, selectedHarness, modelConfig(selectedHarness, settings.modelRouting), { override:input.model || '', session:route.session });
@@ -422,6 +436,10 @@ function sendVersioned(req, res, value) {
 // Lists only need what a row shows; the full task (reply text and all) loads when one is opened.
 const taskSummary = t => ({ id:t.id, title:t.title, status:t.status, harness:t.harness, sessionId:t.sessionId, cwd:t.cwd, createdAt:t.createdAt, updatedAt:t.updatedAt, delivery:t.delivery, tty:t.tty, waitingOn:t.waitingOn, handoffFrom:t.handoffFrom, returnedTo:t.returnedTo, model:t.model, modelSource:t.modelSource, routeSource:t.routeSource, error:(t.error || '').slice(0, 300) });
 const publicTask = ({ agentPrompt, transcriptFile, transcriptOffset, claudeSessionId, nativeSessionId, submitRetries, lastSubmitRetry, waitNotified, ...rest }) => rest;
+function sendText(res, status, text) {
+  res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type':'text/plain; charset=utf-8', 'Cache-Control':'no-store' });
+  res.end(text);
+}
 function send(res, status, value, headers = {}) {
   const data = JSON.stringify(value);
   res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
@@ -581,6 +599,93 @@ async function endAgent(target) {
   }
   return stopAgent(target.pid, target.command);
 }
+// Auto-close: every 10 minutes, live Terminal sessions with no activity for settings.autoClose.hours (12 by default)
+// are ended the same way as "End session", then their Terminal tab is closed. They stay in the list and can be resumed.
+let autoClosing = false;
+async function autoCloseIdle() {
+  const prefs = autoClosePrefs(settings.autoClose);
+  if (!prefs.enabled || autoClosing) return;
+  autoClosing = true;
+  try {
+    const claudeLive = claudeLiveSessions();
+    const idle = idleSessions(sessions(true), { hours:prefs.hours, tasks, statusOf:s => s.harness === 'claude' ? claudeLive.get(s.nativeId)?.statusUpdatedAt || 0 : 0 });
+    for (const session of idle) {
+      const target = endTarget(session);
+      if (!target?.pid) continue;
+      const result = await endAgent(target).catch(error => ({ stopped:false, error }));
+      if (!result.stopped) { console.error(`Auto-close: ${session.id} did not stop${result.error ? `: ${result.error.message}` : ''}`); continue; }
+      cancelSessionTasks(session.id, `Closed after ${prefs.hours} hours without activity.`);
+      const tab = await closeTerminalTab(session.tty).catch(error => ({ closed:false, reason:error.message }));
+      console.log(`Auto-close: ended ${session.id} (${projectLabel(session.cwd)}), idle over ${prefs.hours}h; tab ${tab.closed ? 'closed' : `left open (${tab.reason})`}.`);
+    }
+    if (idle.length) { sessions(true); broadcast('sessions', {}); }
+  } finally { autoClosing = false; }
+}
+// Sessions talking to each other. An agent runs `shed ask`; Shed finds which session it is from the command's parent
+// processes, then sends the message to the other session as a task, whose reply goes back to the asking agent.
+const TALKERS = ['claude', 'codex'];
+function syncExchanges() { if (exchanges.sync(id => tasks.find(t => t.id === id))) broadcast('exchanges', {}); }
+function parentOf(pid) {
+  const result = spawnSync('/bin/ps', ['-o', 'ppid=,comm=', '-p', String(pid)], { encoding:'utf8', timeout:2000 });
+  const match = (result.stdout || '').trim().match(/^(\d+)\s+(.+)$/);
+  return match ? { ppid:Number(match[1]), command:path.basename(match[2]) } : null;
+}
+function callerSession(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  const list = sessions();
+  const claudeByPid = new Map([...claudeLiveSessions()].map(([id, info]) => [info.pid, id]));
+  for (let current = pid, hops = 0; current > 1 && hops < 20; hops++) {
+    if (claudeByPid.has(current)) return list.find(s => s.id === `claude:${claudeByPid.get(current)}`) || null;
+    const info = parentOf(current);
+    if (!info) return null;
+    if (info.command === 'codex') {
+      const tty = ttyOf(current);
+      const session = tty && list.find(s => s.harness === 'codex' && s.tty === tty);
+      if (session) return session;
+    }
+    current = info.ppid;
+  }
+  return null;
+}
+async function sendExchange({ kind, from, to, message, prompt, agentPrompt, target, depth = 0 }) {
+  const { input, route, cwd, model } = await planTask({ prompt, agentPrompt, sessionId:target.id, followup:'stay', harness:'auto', model:'', newSession:false });
+  const task = startTask({ ...input, agentPrompt }, route, model, cwd);
+  Object.assign(task, { exchangeKind:kind }); saveTasks();
+  const exchange = exchanges.add({ id:crypto.randomUUID().slice(0, 8), kind, from:from.id, to:to.id, message, taskId:task.id, depth, status:'sending', createdAt:new Date().toISOString() });
+  task.exchangeId = exchange.id; saveTasks();
+  broadcast('exchanges', {});
+  return { exchange, task };
+}
+const sessionState = s => s.liveState === 'working' ? 'working' : s.liveState === 'asking' ? 'waiting for its person to answer a question' : 'open, idle';
+async function agentRoute(req, res, pathname) {
+  if (pathname === '/api/agent/sessions' && req.method === 'POST') {
+    const input = await body(req);
+    const me = callerSession(Number(input.pid));
+    const list = sessions(true).filter(s => s.liveState !== 'history' && TALKERS.includes(s.harness));
+    return send(res, 200, { sessions:list.map(s => ({ id:s.id, you:s.id === me?.id, label:label[s.harness] || s.harness, project:projectLabel(s.cwd), title:s.title, state:sessionState(s) })) });
+  }
+  if (pathname === '/api/agent/ask' && req.method === 'POST') {
+    const input = await body(req);
+    const message = typeof input.message === 'string' ? input.message.trim().slice(0, 20000) : '';
+    if (!message) return send(res, 400, { error:'Say what to send.' });
+    const list = sessions(true);
+    const from = callerSession(Number(input.pid)), to = list.find(s => s.id === input.to);
+    const open = exchanges.open();
+    const why = refusal({ from, to, open, recent:from ? exchanges.sentWithin(from.id, 3600000) : 0 }) || (TALKERS.includes(to.harness) ? '' : 'Only Claude and Codex sessions can take messages for now.');
+    if (why) return send(res, 409, { error:why });
+    const { exchange } = await sendExchange({ kind:'ask', from, to, message, prompt:`↔ From ${label[from.harness] || from.harness} · ${projectLabel(from.cwd)}: ${message}`, agentPrompt:messagePrompt(from, message, shedCli), target:to, depth:depthFor(from.id, open) });
+    return send(res, 201, { exchange:{ id:exchange.id, toLabel:describe(to) } });
+  }
+  const match = pathname.match(/^\/api\/agent\/exchanges\/([\w-]{1,40})$/);
+  if (match && req.method === 'GET') {
+    refreshQueuedTasks(); syncExchanges();
+    const exchange = exchanges.get(match[1]);
+    if (!exchange) return send(res, 404, { error:'There is no exchange with that id.' });
+    const to = sessions().find(s => s.id === exchange.to);
+    return send(res, 200, { exchange:{ id:exchange.id, status:exchange.status, reply:exchange.reply || '', error:exchange.error || '', toLabel:to ? describe(to) : 'the other session' } });
+  }
+  return send(res, 404, { error:'Unknown command.' });
+}
 function transcriptSize(file) { try { return fs.statSync(file).size; } catch { return 0; } }
 function titleFor(prompt) { return prompt.replace(/\s+/g, ' ').trim().slice(0, 90); }
 function updateTask(task, patch) { Object.assign(task, patch); saveTasks(); }
@@ -642,6 +747,12 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       // Never type a message while the agent shows a question: the Return would pick whatever option is highlighted
       // (for example "No, exit" on Claude's folder-trust question).
       if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`${label} is waiting for an answer in its Terminal. Answer it from the Terminal tab first, then send your message again.`);
+      // A model picked in the drawer: Claude switches with /model first, and the message follows once it's done.
+      if (task.harness === 'claude' && modelDecision.source === 'selected' && terminalModel(modelDecision.model)) {
+        await typeIntoTerminalAsync(session.tty, `/model ${modelDecision.model}`, { prompt:true, agent:'claude' });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`Claude asked something after /model ${modelDecision.model}. Answer it from the Terminal tab, then send your message again.`);
+      }
       // Where the transcript ends now: Shed looks for the message (and the reply) from here on.
       task.transcriptOffset = transcriptSize(session.file);
       await typeIntoTerminalAsync(session.tty, agentPrompt, { prompt:true, agent:task.harness });
@@ -769,6 +880,40 @@ function serveStatic(req, res, pathname) {
   fs.createReadStream(file).pipe(res);
 }
 
+// Share keys: what the "Send to Shed" Shortcut carries. A key can only post shares, never read anything, and is
+// revoked from Settings. Only its hash is stored.
+const shareKeys = () => settings.shareKeys || [];
+const SHARE_BROWSERS = ['', 'chrome', 'safari', 'firefox', 'brave', 'edge', 'arc', 'vivaldi', 'opera', 'chromium'];
+function shareKeyFor(req) {
+  const supplied = (req.headers.authorization || '').replace(/^Bearer /i, '').trim();
+  if (!supplied || supplied.length > 200) return null;
+  const hash = sha256(supplied);
+  return shareKeys().find(k => k.hash.length === hash.length && crypto.timingSafeEqual(Buffer.from(k.hash), Buffer.from(hash))) || null;
+}
+const publicShareKey = k => ({ id:k.id, name:k.name, createdAt:k.createdAt, lastUsedAt:k.lastUsedAt || null, uses:k.uses || 0 });
+const shareUses = new Map(), shortcutDownloads = new Map();
+// Fetches the shared post, then starts a new session with its media attached. Runs after the Shortcut has its answer.
+async function runShare({ url, text, note }) {
+  let fetched = null;
+  try {
+    fetched = url ? await fetchShared(url, { cookiesBrowser:settings.shareCookiesBrowser || '' }) : null;
+    const attachments = (fetched?.files || []).slice(0, 10).map(file => uploads.adopt(file));
+    const input = { prompt:sharePrompt({ url, text, note, fetched }), harness:'auto', model:'', cwd:'', newWorkspace:'', newSession:true, sessionId:null, followup:'auto', attachments, attachmentPaths:[], skipPermissions:false };
+    const { input:planned, route, cwd, model } = await planTask(input);
+    startTask(planned, route, model, cwd);
+  } catch (error) {
+    notify({ title:'Shed could not start your share', body:error.message.slice(0, 180), url:'/', tag:'shed-share' }).catch(() => {});
+  } finally {
+    if (fetched?.dir) fs.rmSync(fetched.dir, { recursive:true, force:true });
+  }
+}
+// The address the Shortcut posts to: the one this phone reached Shed on, or the tunnel when asked from the Mac.
+function publicBase(req) {
+  const host = String(req.headers.host || '');
+  if (req.headers['x-forwarded-proto'] === 'https' && /^[\w.-]+(:\d+)?$/.test(host) && !isDirectLocal(req)) return `https://${host}`;
+  return remoteUrl() || '';
+}
+
 const server = http.createServer(async (req, res) => {
   const pathname = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`).pathname;
   try {
@@ -814,7 +959,93 @@ const server = http.createServer(async (req, res) => {
       const device = deviceFor(req);
       return send(res, 200, { status:device?.status || 'none', name:device?.name || '' });
     }
+    // A share from the iPhone Shortcut: answered in plain text, which the Shortcut shows as a notification.
+    if (pathname === '/api/share' && req.method === 'POST') {
+      const key = shareKeyFor(req);
+      if (!key && !isAuthorized(req)) return sendText(res, 401, 'Shed did not accept this Shortcut. Download a new one from Shed → Settings → Share from iPhone.');
+      const recent = (shareUses.get(key?.id || 'web') || []).filter(at => Date.now() - at < 3600000);
+      if (recent.length >= 30) return sendText(res, 429, 'Too many shares this hour. Try again later.');
+      shareUses.set(key?.id || 'web', [...recent, Date.now()]);
+      const input = await body(req);
+      const flat = value => Array.isArray(value) ? value.map(flat).join('\n') : typeof value === 'string' ? value : value && typeof value === 'object' ? String(value.url || value.link || value.text || '') : '';
+      const text = flat(input.shared || input.url || input.text).slice(0, 10000), note = flat(input.note).slice(0, 4000);
+      const url = extractUrl(text);
+      if (!url && !text.trim()) return sendText(res, 400, 'Nothing came through to share. Share a post or a link.');
+      if (key) { key.lastUsedAt = new Date().toISOString(); key.uses = (key.uses || 0) + 1; saveSettings(); }
+      runShare({ url, text, note });
+      return sendText(res, 202, url ? `Got it. Fetching the ${url.includes('instagram.com') ? 'post' : 'link'}, then an agent gets to work. I'll ping you when it's done.` : "Got it. An agent is on it; I'll ping you when it's done.");
+    }
+    const downloadMatch = pathname.match(/^\/api\/share\/download\/([\w-]{20,64})$/);
+    if (downloadMatch && req.method === 'GET') {
+      const pending = shortcutDownloads.get(downloadMatch[1]);
+      shortcutDownloads.delete(downloadMatch[1]);
+      if (!pending || pending.expires < Date.now()) return sendText(res, 410, 'This link has expired. Go back to Shed → Settings and tap "Get the Shortcut" again.');
+      const key = crypto.randomBytes(32).toString('base64url');
+      const file = await signedShortcut(pending.base, key);
+      const record = { id:crypto.randomUUID(), hash:sha256(key), name:`Send to Shed · ${new Date().toLocaleDateString('en-US', { month:'short', day:'numeric' })}`, createdAt:new Date().toISOString(), base:pending.base };
+      settings = { ...settings, shareKeys:[...shareKeys(), record].slice(-10) };
+      saveSettings();
+      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type':'application/octet-stream', 'Content-Disposition':'attachment; filename="Send to Shed.shortcut"', 'Content-Length':file.length, 'Cache-Control':'no-store' });
+      return res.end(file);
+    }
+    if (pathname.startsWith('/api/agent/')) {
+      const supplied = (req.headers.authorization || '').replace(/^Bearer /i, '');
+      if (!isDirectLocal(req) || supplied.length !== agentKey.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(agentKey))) return send(res, 401, { error:'Shed did not accept this command. Run it from an agent session on the Mac where Shed runs.' });
+      return agentRoute(req, res, pathname);
+    }
     if (!isAuthorized(req)) return send(res, 401, { error: 'Authentication required.' });
+    // Getting the Shortcut takes two steps: a signed-in request makes a one-time link, and opening that link (a plain
+    // download, which iOS hands to the Shortcuts app) makes the key and the signed file.
+    if (pathname === '/api/share/shortcut' && req.method === 'POST') {
+      const base = publicBase(req);
+      if (!base) return send(res, 409, { error:'Shed has no address the phone can reach yet. Start the tunnel first.' });
+      for (const [c, d] of shortcutDownloads) if (d.expires < Date.now()) shortcutDownloads.delete(c);
+      if (shortcutDownloads.size > 50) return send(res, 429, { error:'Too many Shortcut links. Try again in a few minutes.' });
+      const code = crypto.randomBytes(24).toString('base64url');
+      shortcutDownloads.set(code, { base, expires:Date.now() + 5 * 60 * 1000 });
+      const full = `${base}/api/share/download/${code}`;
+      // On the Mac, a QR code: the iPhone camera opens it in Safari, which hands the file to the Shortcuts app.
+      const qr = await QRCode.toString(full, { type:'svg', margin:1, errorCorrectionLevel:'M', color:{ dark:'#1e1c19', light:'#fffdf8' } });
+      return send(res, 200, { download:`/api/share/download/${code}`, url:full, qr });
+    }
+    // On the Mac itself: opens the Shortcut in the Shortcuts app, which syncs it to the iPhone over iCloud.
+    if (pathname === '/api/share/install-on-mac' && req.method === 'POST') {
+      if (!isLocalRequest(req)) return send(res, 403, { error:'This only works from Shed on the Mac.' });
+      const base = publicBase(req);
+      if (!base) return send(res, 409, { error:'Shed has no address the phone can reach yet. Start the tunnel first.' });
+      const key = crypto.randomBytes(32).toString('base64url');
+      const file = await signedShortcut(base, key);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shed-install-')), target = path.join(dir, 'Send to Shed.shortcut');
+      fs.writeFileSync(target, file, { mode:0o600 });
+      settings = { ...settings, shareKeys:[...shareKeys(), { id:crypto.randomUUID(), hash:sha256(key), name:`Send to Shed · ${new Date().toLocaleDateString('en-US', { month:'short', day:'numeric' })}`, createdAt:new Date().toISOString(), base }].slice(-10) };
+      saveSettings();
+      spawn('/usr/bin/open', [target], { stdio:'ignore', detached:true }).unref();
+      setTimeout(() => fs.rmSync(dir, { recursive:true, force:true }), 10 * 60 * 1000);
+      return send(res, 200, { ok:true });
+    }
+    // For building the Shortcut by hand on the phone: the address and a new key, shown once.
+    if (pathname === '/api/share/manual-key' && req.method === 'POST') {
+      const base = publicBase(req);
+      if (!base) return send(res, 409, { error:'Shed has no address the phone can reach yet. Start the tunnel first.' });
+      const key = crypto.randomBytes(32).toString('base64url');
+      settings = { ...settings, shareKeys:[...shareKeys(), { id:crypto.randomUUID(), hash:sha256(key), name:`Send to Shed (built by hand) · ${new Date().toLocaleDateString('en-US', { month:'short', day:'numeric' })}`, createdAt:new Date().toISOString(), base }].slice(-10) };
+      saveSettings();
+      return send(res, 200, { url:`${base}/api/share`, header:`Bearer ${key}` });
+    }
+    if (pathname === '/api/share/settings' && req.method === 'GET') return send(res, 200, { keys:shareKeys().map(publicShareKey), cookiesBrowser:settings.shareCookiesBrowser || '', browsers:SHARE_BROWSERS, base:publicBase(req) });
+    if (pathname === '/api/share/settings' && req.method === 'POST') {
+      const input = await body(req);
+      if (!SHARE_BROWSERS.includes(input.cookiesBrowser)) return send(res, 400, { error:'Unknown browser.' });
+      settings = { ...settings, shareCookiesBrowser:input.cookiesBrowser };
+      saveSettings();
+      return send(res, 200, { cookiesBrowser:input.cookiesBrowser });
+    }
+    const shareKeyMatch = pathname.match(/^\/api\/share\/keys\/([\w-]+)$/);
+    if (shareKeyMatch && req.method === 'DELETE') {
+      settings = { ...settings, shareKeys:shareKeys().filter(k => k.id !== shareKeyMatch[1]) };
+      saveSettings();
+      return send(res, 200, { keys:shareKeys().map(publicShareKey) });
+    }
     if (pathname === '/api/connect' && req.method === 'GET') {
       const base = remoteUrl() || (lanEnabled ? `http://${lanAddress()}:${port}` : '');
       if (!base) return send(res, 200, { url:'', secure:false, qr:'', phoneConnectedAt:settings.phoneConnectedAt || null });
@@ -889,6 +1120,13 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok:true });
     }
     if (pathname === '/api/push/unsubscribe' && req.method === 'POST') { const input = await body(req); unsubscribe(String(input.endpoint || '')); return send(res, 200, { ok:true }); }
+    if (pathname === '/api/autoclose' && req.method === 'GET') return send(res, 200, { prefs:autoClosePrefs(settings.autoClose) });
+    if (pathname === '/api/autoclose' && req.method === 'POST') {
+      const input = await body(req);
+      settings = { ...settings, autoClose:autoClosePrefs({ enabled:input.enabled !== false, hours:input.hours ?? settings.autoClose?.hours }) }; saveSettings();
+      autoCloseIdle().catch(error => console.error(`Auto-close failed: ${error.message}`));
+      return send(res, 200, { prefs:settings.autoClose });
+    }
     if (pathname === '/api/push/prefs' && req.method === 'POST') {
       const input = await body(req);
       settings = { ...settings, notify:{ finished:input.finished !== false, asking:input.asking !== false } }; saveSettings();
@@ -901,7 +1139,7 @@ const server = http.createServer(async (req, res) => {
       const owner = filesMatch[1] === 'sessions' ? sessions().find(s => s.id === id) : tasks.find(t => t.id === id);
       const root = owner?.cwd;
       if (!root || root === '/' || !fs.existsSync(root)) return send(res, 404, { error:'This session has no project folder on the Mac.' });
-      if (filesMatch[3] === 'files') return send(res, 200, { root:path.basename(root), files:listArtifacts(root) });
+      if (filesMatch[3] === 'files') return send(res, 200, { root:path.basename(root), ...listArtifacts(root) });
       const query = new URL(req.url, 'http://x').searchParams;
       const file = resolveInside(root, query.get('path'));
       if (!file) return send(res, 404, { error:'That file is not available.' });
@@ -974,6 +1212,30 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok:true });
       }
     }
+    // Changing an open Claude session's permission mode: Shift+Tab until its footer names the mode asked for. Only the
+    // modes Claude's own cycle offers; skipping permissions is never switched on from here.
+    const permMatch = pathname.match(/^\/api\/sessions\/(.+)\/permissions$/);
+    if (permMatch && req.method === 'POST') {
+      const input = await body(req);
+      const target = input.mode;
+      if (!['ask', 'edits', 'plan', 'auto'].includes(target)) return send(res, 400, { error:'That mode can\'t be chosen from Shed.' });
+      const session = sessions(true).find(s => s.id === decodeURIComponent(permMatch[1]));
+      if (!session || session.harness !== 'claude' || !session.tty) return send(res, 409, { error:'Only Claude sessions open in a Terminal window can change mode here.' });
+      if (!agentInForeground(session.tty, 'claude')) return send(res, 409, { error:'Claude is no longer running in that Terminal tab.' });
+      let screen = await readTerminalAsync(session.tty, 14) || '';
+      if (QUESTION_ON_SCREEN.test(screen)) return send(res, 409, { error:'Claude is asking something. Answer it from the Terminal tab first.' });
+      if (/\n\s*❯ *\S/.test(screen)) return send(res, 409, { error:'There is unsent text on the Terminal\'s input line. Clear it on the Mac first.' });
+      const start = footerMode(screen);
+      if (!start) return send(res, 409, { error:'Shed can\'t read Claude\'s mode from its Terminal right now. Try again in a moment.' });
+      // Shift+Tab steps through the modes Claude offers. If the one asked for never comes up, step on round to where it began.
+      const press = async () => { await typeIntoTerminalAsync(session.tty, '\u001b[Z'); await new Promise(resolve => setTimeout(resolve, 800)); return footerMode(await readTerminalAsync(session.tty, 14) || ''); };
+      let mode = start;
+      for (let presses = 0; mode !== target && presses < 5; presses++) mode = await press();
+      for (let presses = 0; mode !== target && mode !== start && presses < 5; presses++) mode = await press();
+      sessions(true); broadcast('sessions', {});
+      if (mode === target) return send(res, 200, { ok:true, mode });
+      return send(res, 409, { error:'Claude doesn\'t offer that mode in this session, so it was left as it was.', mode });
+    }
     const endMatch = pathname.match(/^\/api\/sessions\/(.+)\/end$/);
     if (endMatch && req.method === 'POST') {
       const session = sessions(true).find(s => s.id === decodeURIComponent(endMatch[1]));
@@ -1008,7 +1270,18 @@ const server = http.createServer(async (req, res) => {
       const { route, model } = await planTask({ ...input, prompt:input.prompt.slice(0, 20000), harness:'auto', newSession:false });
       return send(res, 200, { route: { harness:route.session?.harness || route.harness, handoff:Boolean(route.handoff), reason:route.reason, fallbackReason:route.fallbackReason || '', confidence:route.score ?? null, source:route.source, model:model.model, modelSource:model.source, modelReason:model.reason } });
     }
-    if (pathname === '/api/tasks' && req.method === 'GET') { refreshQueuedTasks(); return sendVersioned(req, res, { tasks: tasks.slice(0, 60).map(taskSummary) }); }
+    if (pathname === '/api/tasks' && req.method === 'GET') { refreshQueuedTasks(); syncExchanges(); return sendVersioned(req, res, { tasks: tasks.slice(0, 60).map(taskSummary), exchanges:exchanges.all().slice(0, 40).map(exchangeSummary) }); }
+    // Introducing two sessions: the first is told how to reach the second, with the person's note on what to work out.
+    if (pathname === '/api/exchanges/introduce' && req.method === 'POST') {
+      const input = await body(req);
+      const list = sessions(true);
+      const from = list.find(s => s.id === input.from), to = list.find(s => s.id === input.to);
+      const note = typeof input.note === 'string' ? input.note.slice(0, 4000) : '';
+      const why = !from || !to ? 'Pick two open sessions.' : from.id === to.id ? 'Pick a different session to talk to.' : [from, to].some(s => s.liveState === 'history') ? 'Both sessions need to be open.' : [from, to].some(s => !TALKERS.includes(s.harness)) ? 'Only Claude and Codex sessions can talk to each other for now.' : '';
+      if (why) return send(res, 400, { error:why });
+      const { exchange } = await sendExchange({ kind:'intro', from, to, message:note, prompt:`↔ Talk to ${label[to.harness] || to.harness} · ${projectLabel(to.cwd)}${note ? `: ${note}` : ''}`, agentPrompt:introductionPrompt(to, note, shedCli), target:from });
+      return send(res, 201, { exchange:exchangeSummary(exchange) });
+    }
     // Attachments: the file is the request body; its name comes in X-File-Name (URI-encoded).
     if (pathname === '/api/uploads' && req.method === 'POST') {
       let name = '';
@@ -1071,4 +1344,5 @@ server.listen(port, host, () => {
   setInterval(() => { sessions(true); watchAndNotify(); }, 10000).unref();
   pro.check();
   setInterval(() => pro.check(), 3600000).unref();
+  setInterval(() => autoCloseIdle().catch(error => console.error(`Auto-close failed: ${error.message}`)), 600000).unref();
 });

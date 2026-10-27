@@ -52,6 +52,15 @@ export function uploadStore(dataDir) {
     return { id, name:path.basename(file), size };
   }
 
+  // Stages a file already on this Mac (a downloaded post, say), as if it had been uploaded. Returns its id.
+  function adopt(file) {
+    const id = crypto.randomBytes(18).toString('base64url');
+    const dest = path.join(stageDir(id), safeFileName(path.basename(file)));
+    fs.mkdirSync(stageDir(id), { recursive:true, mode:0o700 });
+    try { fs.renameSync(file, dest); } catch { fs.copyFileSync(file, dest); }
+    return id;
+  }
+
   function discard(id) {
     if (UPLOAD_ID.test(id)) fs.rmSync(stageDir(id), { recursive:true, force:true });
   }
@@ -82,7 +91,7 @@ export function uploadStore(dataDir) {
     return placed;
   }
 
-  return { stage, discard, place };
+  return { stage, adopt, discard, place };
 }
 
 // Adds .shed/ to the repository's local exclude list (never to its .gitignore), so uploads are not committed.

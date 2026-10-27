@@ -1,0 +1,63 @@
+#!/usr/bin/env node
+// Lets an agent session talk to the other sessions Shed knows about, from its own shell:
+//   shed sessions                     the open sessions, and which one is you
+//   shed ask <session id> "message"   sends the message, waits for the answer and prints it
+//   shed reply <exchange id>          keeps waiting for an answer that had not come yet
+// Shed works out which session is asking from this process's parents, so only agents running on this Mac can use it.
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const dataDir = process.env.LAYA_DATA_DIR || process.env.JEV_DATA_DIR || path.join(root, '.jev-data');
+const usage = 'Usage:\n  shed sessions\n  shed ask <session id> "message" [--wait seconds]\n  shed reply <exchange id> [--wait seconds]';
+
+function fail(message, code = 1) { process.stderr.write(`${message}\n`); process.exit(code); }
+let agent;
+try { agent = JSON.parse(fs.readFileSync(path.join(dataDir, 'agent.json'), 'utf8')); }
+catch { fail('Shed is not running on this Mac (no agent.json in its data folder).'); }
+
+async function call(method, route, payload) {
+  let res;
+  try {
+    res = await fetch(`http://127.0.0.1:${agent.port}${route}`, { method, headers:{ Authorization:`Bearer ${agent.key}`, 'Content-Type':'application/json' }, body:payload ? JSON.stringify({ ...payload, pid:process.pid }) : undefined, signal:AbortSignal.timeout(20000) });
+  } catch (error) { fail(`Could not reach Shed: ${error.message}. If you run in a sandbox without network access, ask to run this command outside it.`); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) fail(data.error || `Shed answered ${res.status}.`);
+  return data;
+}
+
+// Most agent tools stop a command after about two minutes, so waiting stops a little before that by default.
+async function wait(id, seconds) {
+  const until = Date.now() + seconds * 1000;
+  for (;;) {
+    const { exchange } = await call('GET', `/api/agent/exchanges/${encodeURIComponent(id)}?pid=${process.pid}`);
+    if (exchange.status === 'answered') { process.stdout.write(`${exchange.reply || '(It answered with no text.)'}\n`); return; }
+    if (exchange.status === 'failed') fail(`The message did not get an answer: ${exchange.error}`);
+    if (Date.now() > until) {
+      process.stdout.write(`No answer yet; ${exchange.toLabel} is still working on it.\nRun: shed reply ${id}\nto keep waiting.\n`);
+      process.exit(3);
+    }
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+}
+
+const args = process.argv.slice(2);
+const waitIndex = args.indexOf('--wait');
+const seconds = waitIndex >= 0 ? Math.max(5, Math.min(3600, Number(args.splice(waitIndex, 2)[1]) || 110)) : 110;
+const [command, ...rest] = args;
+if (command === 'sessions') {
+  const { sessions } = await call('POST', '/api/agent/sessions', {});
+  if (!sessions.length) process.stdout.write('No other sessions are open.\n');
+  for (const s of sessions) process.stdout.write(`${s.id}${s.you ? '  (you)' : ''}\n  ${s.label} · ${s.project} · ${s.state}\n  ${s.title}\n`);
+} else if (command === 'ask') {
+  const [to, ...words] = rest;
+  const message = words.join(' ').trim() || (!process.stdin.isTTY ? fs.readFileSync(0, 'utf8').trim() : '');
+  if (!to || !message) fail(usage, 2);
+  const { exchange } = await call('POST', '/api/agent/ask', { to, message });
+  process.stderr.write(`Sent to ${exchange.toLabel} (exchange ${exchange.id}). Waiting for its answer…\n`);
+  await wait(exchange.id, seconds);
+} else if (command === 'reply') {
+  if (!rest[0]) fail(usage, 2);
+  await wait(rest[0], seconds);
+} else fail(usage, 2);

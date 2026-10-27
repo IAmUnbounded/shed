@@ -6,7 +6,6 @@ import path from 'node:path';
 // (private to this user); tunnel.js notices the file change and switches from the Quick Tunnel to the named tunnel.
 export const RELAY_API = process.env.SHED_RELAY_API || 'https://shed-sigma.vercel.app/api/relay';
 export const RELAY_DOMAIN = process.env.SHED_RELAY_DOMAIN || 'shed.link';
-export const BUY_URL = process.env.SHED_BUY_URL || 'https://shed-sigma.vercel.app/#pro';
 
 export function proStore(dataDir, { fetchImpl = fetch, port = 4378 } = {}) {
   const file = path.join(dataDir, 'relay.json');
@@ -21,7 +20,7 @@ export function proStore(dataDir, { fetchImpl = fetch, port = 4378 } = {}) {
   return {
     status() {
       const relay = read();
-      return relay ? { active:true, hostname:relay.hostname, url:`https://${relay.hostname}`, checkedAt:relay.checkedAt || null, buyUrl:BUY_URL, domain:RELAY_DOMAIN } : { active:false, buyUrl:BUY_URL, domain:RELAY_DOMAIN };
+      return relay ? { active:true, hostname:relay.hostname, url:`https://${relay.hostname}`, checkedAt:relay.checkedAt || null, domain:RELAY_DOMAIN } : { active:false, domain:RELAY_DOMAIN };
     },
     async activate(licenseKey, name) {
       const previous = read();

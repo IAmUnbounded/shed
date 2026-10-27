@@ -15,11 +15,11 @@ const SKIP = new Set(['node_modules', '.git', '.next', '.cache', '__pycache__', 
 export const isArtifact = name => Boolean(TYPES[path.extname(name).toLowerCase()]);
 export const artifactKind = name => (TYPES[path.extname(name).toLowerCase()] || '').split('/')[0];
 
-// Newest artifact files under the project folder, a few levels deep.
-export function listArtifacts(root, limit = 60) {
+// Artifact files under the project folder, newest first. `total` counts every match found, even past the limit.
+export function listArtifacts(root, limit = 2000) {
   const found = [];
   const walk = (dir, depth) => {
-    if (depth > 4 || found.length > 2000) return;
+    if (depth > 8 || found.length >= 10000) return;
     let entries = [];
     try { entries = fs.readdirSync(dir, { withFileTypes:true }); } catch { return; }
     for (const entry of entries) {
@@ -32,7 +32,8 @@ export function listArtifacts(root, limit = 60) {
     }
   };
   walk(root, 0);
-  return found.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)).slice(0, limit);
+  found.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+  return { files:found.slice(0, limit), total:found.length };
 }
 
 // Resolves a requested path and refuses anything outside the project folder, including through symlinks.
