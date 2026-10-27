@@ -214,19 +214,18 @@ footer a { color: var(--cream); }
 .install small { display: block; margin-top: 10px; color: var(--muted); font-size: 13px; }
 .install small a { color: var(--cream); }
 
-/* Pricing */
-.plans { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 36px; }
-.plan { background: var(--night-raised); border: 1px solid var(--line); border-radius: 16px; padding: 26px; display: flex; flex-direction: column; gap: 14px; }
-.plan.featured { border-color: var(--roof); box-shadow: 0 0 0 1px var(--roof) inset; }
-.plan .price { font: 800 40px/1 var(--display); letter-spacing: -.02em; }
-.plan .price small { font: 500 14px var(--body); color: var(--muted); letter-spacing: 0; }
-.plan ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; color: var(--muted); font-size: 15px; }
-.plan li::before { content: "■ "; color: var(--mint); font-size: 10px; vertical-align: 2px; }
-.plan .btn { justify-content: center; margin-top: auto; }
-.meter { height: 10px; border-radius: 3px; background: #0d1310; border: 1px solid var(--line); overflow: hidden; }
-.meter i { display: block; height: 100%; width: 0; background: var(--roof); transition: width .6s; }
-.meter-label { font: 500 12px var(--mono); color: var(--muted); }
-@media (max-width: 860px) { .plans { grid-template-columns: 1fr; } }
+/* Pro waitlist */
+.waitlist { background: var(--night-raised); border: 1px solid var(--roof); box-shadow: 0 0 0 1px var(--roof) inset; border-radius: 16px; padding: 28px; display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 32px; align-items: center; }
+.waitlist ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; color: var(--muted); font-size: 16px; }
+.waitlist li::before { content: "■ "; color: var(--mint); font-size: 10px; vertical-align: 2px; }
+.waitlist form { display: grid; gap: 10px; }
+.waitlist input[type=email] { font: 500 16px var(--body); padding: 13px 14px; border-radius: 10px; border: 1px solid var(--line); background: #0d1310; color: var(--cream); min-width: 0; }
+.waitlist input[type=email]:focus { outline: 2px solid var(--mint); outline-offset: 1px; }
+.waitlist button { justify-content: center; cursor: pointer; }
+.waitlist .trap { position: absolute; left: -9999px; }
+.waitlist-note { font: 500 13px var(--body); color: var(--muted); min-height: 1.4em; }
+.waitlist-note.ok { color: var(--mint); }
+@media (max-width: 860px) { .waitlist { grid-template-columns: 1fr; } }
 </style>
 
 <header class="nav">
@@ -237,7 +236,7 @@ footer a { color: var(--cream); }
       <a href="#agents">Agents</a>
       <a href="#features">Features</a>
       <a href="#harnesses">Harnesses</a>
-      <a href="#pricing">Pricing</a>
+      <a href="#pro">Pro</a>
       <a href="#faq">FAQ</a>
     </nav>
     <a class="nav-cta" href="#install">Install</a>
@@ -380,30 +379,18 @@ footer a { color: var(--cream); }
     </div>
   </section>
 
-  <section id="pricing">
+  <section id="pro">
     <div class="wrap">
-      <div class="section-head"><div class="pixel">Pricing</div><h2>Free on your Mac. Pro when you leave it.</h2><p class="lede">Shed is open source and complete without paying. Pro is for people who live on their phone: an address that never changes, so the Home Screen app and its notifications keep working.</p></div>
-      <div class="plans">
-        <div class="plan">
-          <div class="pixel">Shed</div>
-          <div class="price">$0 <small>forever, MIT</small></div>
-          <ul><li>Every feature in the app</li><li>Claude Code, Codex, Gemini, OpenCode, Pi</li><li>Laya routing on your Mac</li><li>Temporary secure link (changes on restart)</li></ul>
-          <a class="btn" href="#install">Install in one line</a>
-        </div>
-        <div class="plan featured" id="pro">
-          <div class="pixel">Founding Pro</div>
-          <div class="price">$149 <small>once, for life</small></div>
-          <ul><li>Permanent address: <code>you.shed.link</code></li><li>Notifications that survive restarts</li><li>Your name on the founders wall</li><li>A vote on what ships next</li></ul>
-          <div><div class="meter" aria-hidden="true"><i data-meter></i></div><div class="meter-label" data-meter-label>200 founding licences, then $12 a month</div></div>
-          <a class="btn primary" data-checkout="pro" href="#install">Become a founder</a>
-        </div>
-        <div class="plan" id="teams">
-          <div class="pixel">Teams</div>
-          <div class="price">From $8k <small>one week</small></div>
-          <ul><li>Shed on every engineer's Mac</li><li>Permission policies and safe defaults</li><li>CLAUDE.md, skills and hooks for your codebase</li><li>A hands-on session with your team</li></ul>
-          <a class="btn" data-checkout="teams" href="#teams">Reserve a rollout week</a>
-          <small class="meter-label" data-teams-note>A $1,000 deposit holds your week and counts toward the fee.</small>
-        </div>
+      <div class="section-head"><div class="pixel">Shed Pro · Coming soon</div><h2>Free on your Mac. Pro when you leave it.</h2><p class="lede">Shed is open source and complete without paying. Pro is for people who live on their phone: an address that never changes, so the Home Screen app and its notifications keep working.</p></div>
+      <div class="waitlist">
+        <ul><li>A permanent address like <code>you.shed.link</code></li><li>Notifications that survive restarts</li><li>Early access, and a say in what ships next</li></ul>
+        <form data-waitlist novalidate>
+          <label class="pixel" for="waitlist-email">Join the waitlist</label>
+          <input id="waitlist-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required maxlength="254">
+          <input class="trap" name="company" tabindex="-1" autocomplete="off" aria-hidden="true">
+          <button class="btn primary" type="submit">Tell me when Pro is ready</button>
+          <div class="waitlist-note" data-waitlist-note role="status">One email when Pro opens. Nothing else.</div>
+        </form>
       </div>
     </div>
   </section>
@@ -417,7 +404,7 @@ footer a { color: var(--cream); }
         <details><summary>What happens when an agent asks for permission?</summary><p>Its pixel agent switches to "Needs your OK" and moves to the front. Open the Terminal tab and tap 1, 2 or 3, the same answer you would type at the Mac.</p></details>
         <details><summary>Can Shed start new sessions, or only continue old ones?</summary><p>Both. Send a message with no session and Shed opens a new Terminal window for the harness Laya picks, in a project you choose.</p></details>
         <details><summary>What does Laya do?</summary><p>Laya is an open-source decision model that runs locally. It picks the harness and model for new work, and decides whether a follow-up should stay in its session or move to a better-suited agent.</p></details>
-        <details><summary>What does Pro add?</summary><p>A permanent https address on the Shed relay instead of a temporary Cloudflare link. Everything else is in the free version. Your traffic goes through a Cloudflare tunnel straight to your Mac; your password and device approval still guard it.</p></details>
+        <details><summary>What will Pro add?</summary><p>A permanent https address on the Shed relay instead of a temporary Cloudflare link. Everything else is in the free version, and Pro isn’t on sale yet: <a href="#pro">join the waitlist</a> to hear when it is. Your traffic goes through a Cloudflare tunnel straight to your Mac; your password and device approval still guard it.</p></details>
         <details><summary>Is it safe to pipe the installer into sh?</summary><p>Read it first: it is about 120 lines and lives in the open repo. It clones Shed into <code>~/.shed/app</code>, installs Node and cloudflared with Homebrew if missing, and adds two launch agents. Uninstall with <code>sh -s -- --uninstall</code>.</p></details>
         <details><summary>Does the Mac have to stay on?</summary><p>Yes. The agents run on your Mac, so it needs to be awake and online. Shed starts automatically when you sign in.</p></details>
       </div>
@@ -440,25 +427,26 @@ footer a { color: var(--cream); }
 </footer>
 
 <script>
-// Checkout links (Lemon Squeezy). Empty until the store is live: the buttons then fall back to the installer.
-const SHED = { proCheckout:'', teamsCheckout:'', teamsEmail:'' };
-document.querySelectorAll('[data-checkout]').forEach(a => {
-  const url = a.dataset.checkout === 'pro' ? SHED.proCheckout : SHED.teamsCheckout;
-  if (url) a.href = url;
-  else if (a.dataset.checkout === 'teams' && SHED.teamsEmail) a.href = `mailto:${SHED.teamsEmail}?subject=Shed%20for%20Teams`;
-});
 document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
   const text = button.parentElement.querySelector('[data-install]').textContent;
   try { await navigator.clipboard.writeText(text); button.textContent = 'Copied'; } catch { button.textContent = 'Select it'; }
   setTimeout(() => { button.textContent = 'Copy'; }, 1800);
 }));
-// The live founding counter; the static text stays if the API is unreachable (for example in a preview).
-fetch('/api/founding').then(r => r.ok ? r.json() : null).then(data => {
-  if (!data || !data.limit) return;
-  const left = Math.max(0, data.limit - data.sold);
-  document.querySelector('[data-meter]').style.width = `${Math.min(100, data.sold / data.limit * 100)}%`;
-  document.querySelector('[data-meter-label]').textContent = left ? `${left} of ${data.limit} founding licences left, then $12 a month` : 'Founding licences are sold out. Pro is $12 a month.';
-}).catch(() => {});
+// Pro waitlist: the address goes to /api/waitlist and is kept privately in Shed's Vercel Blob store.
+document.querySelectorAll('[data-waitlist]').forEach(form => form.addEventListener('submit', async event => {
+  event.preventDefault();
+  const note = form.querySelector('[data-waitlist-note]'), button = form.querySelector('button');
+  const email = form.email.value.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { note.className = 'waitlist-note'; note.textContent = 'That doesn’t look like an email address.'; return; }
+  button.disabled = true; note.className = 'waitlist-note'; note.textContent = 'Adding you…';
+  try {
+    const res = await fetch('/api/waitlist', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ email, company:form.company.value }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again in a minute.');
+    note.className = 'waitlist-note ok'; note.textContent = 'You’re on the list. We’ll email you when Pro opens.'; form.email.value = '';
+  } catch (error) { note.textContent = error instanceof TypeError ? 'Couldn’t reach the waitlist. Check your connection and try again.' : error.message; }
+  finally { button.disabled = false; }
+}));
 </script>
 <script>
 // Pixel sprites shared with the Shed app: rows of single-letter colors, '.' is empty.

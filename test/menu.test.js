@@ -24,7 +24,7 @@ const claudeBash = `
  Do you want to proceed?
    1. Yes
  ❯ 2. Yes, and don't ask again for rm -rf build && npm run build commands in
-      /Users/techie007/Shed Workspaces/my-app
+      /Users/you/Shed Workspaces/my-app
    3. No, and tell Claude what to do differently (esc)
 
  Esc to cancel · Tab to amend · ctrl+e to explain`;
@@ -57,7 +57,7 @@ test('reads numbered Claude options, joining a wrapped one, with the pointer on 
   assert.equal(menu.current, 1);
   assert.deepEqual(menu.options, [
     '1. Yes',
-    "2. Yes, and don't ask again for rm -rf build && npm run build commands in /Users/techie007/Shed Workspaces/my-app",
+    "2. Yes, and don't ask again for rm -rf build && npm run build commands in /Users/you/Shed Workspaces/my-app",
     '3. No, and tell Claude what to do differently (esc)',
   ]);
 });

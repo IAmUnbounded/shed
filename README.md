@@ -26,9 +26,9 @@ Options (environment variables): `SHED_HOME` (default `~/.shed`), `SHED_PORT` (d
 
 ## Shed Pro
 
-The free tunnel's address changes whenever it restarts, which breaks the Home Screen app and its push notifications. Shed Pro gives the Mac a permanent `https://<name>.shed.link` address.
+The free tunnel's address changes whenever it restarts, which breaks the Home Screen app and its push notifications. Shed Pro will give the Mac a permanent `https://<name>.shed.link` address. It isn't on sale yet: [join the waitlist](https://shed-sigma.vercel.app/#pro) to hear when it is.
 
-To turn it on, paste your licence key under **Settings → Permanent address** on the Mac. Shed asks the relay (`site/api/relay.js`) for a Cloudflare named tunnel and saves its token in `.jev-data/relay.json`. `server/tunnel.js` then switches from the Quick Tunnel to that tunnel. Traffic goes from Cloudflare straight to your Mac; the relay only manages the tunnel, and your password and device approval still apply.
+Once you have a licence key, turn it on by pasting it under **Settings → Permanent address** on the Mac. Shed asks the relay (`site/api/relay.js`) for a Cloudflare named tunnel and saves its token in `.jev-data/relay.json`. `server/tunnel.js` then switches from the Quick Tunnel to that tunnel. Traffic goes from Cloudflare straight to your Mac; the relay only manages the tunnel, and your password and device approval still apply.
 
 ## Open it
 
