@@ -4,11 +4,11 @@ import {AbsoluteFill, Img, Sequence, continueRender, delayRender, interpolate, s
 // "What is Shed": a 62-second tour in the same night palette, fonts and pixel sprites as the Shed app and site.
 export const TOUR_FRAMES = 2400;
 
-const C = {
+export const C = {
   night: '#131b17', raised: '#1a241f', line: '#2b3a32', cream: '#efe6d4', muted: '#a6b0a3',
   mint: '#7ee2c0', roof: '#d9774f', paper: '#f6efe2', ink: '#262520', term: '#0d1210',
 };
-const F = {
+export const F = {
   display: "'Bricolage Grotesque', sans-serif",
   body: "'IBM Plex Sans', sans-serif",
   mono: "'IBM Plex Mono', monospace",
@@ -22,7 +22,7 @@ const FONTS: [string, string][] = [
   ['IBM Plex Mono', 'fonts/IBMPlexMono.woff2'],
   ['Silkscreen', 'fonts/Silkscreen.woff2'],
 ];
-const useFonts = () => {
+export const useFonts = () => {
   const [handle] = useState(() => delayRender('fonts'));
   useEffect(() => {
     Promise.all(FONTS.map(([family, file]) => new FontFace(family, `url(${staticFile(file)})`).load().then(face => document.fonts.add(face))))
@@ -33,7 +33,7 @@ const useFonts = () => {
 
 // ---------- pixel sprites (shared with the app and site) ----------
 type Sprite = {colors: Record<string, string | [string, string]>; rows: string[]};
-const SPRITES: Record<string, Sprite> = {
+export const SPRITES: Record<string, Sprite> = {
   claude: {colors: {B: '#da7758', E: '#1d1a17'}, rows: ['................', '...BBBBBBBBBB...', '...BBBBBBBBBB...', '...BBEBBBBEBB...', '...BBEBBBBEBB...', '.BBBBBBBBBBBBBB.', '.BBBBBBBBBBBBBB.', '...BBBBBBBBBB...', '...BBBBBBBBBB...', '....B.B..B.B....', '....B.B..B.B....']},
   codex: {colors: {B: '#2d2f33', E: '#7ee2c0', D: '#7ee2c0', H: '#10a37f', A: '#8e8ea0'}, rows: ['.......H........', '.......A........', '...BBBBBBBBBB...', '..BBBBBBBBBBBB..', '..BBBEBBBBEBBB..', '..BBBEBBBBEBBB..', '..BBBBBBBBBBBB..', '..BBBBDBBDBBBB..', '...BBBBDDBBBB...', '.....BB..BB.....', '.....BB..BB.....']},
   gemini: {colors: {B: ['#4c8df6', '#8f6cf6'], E: '#ffffff'}, rows: ['.......BB.......', '......BBBB......', '.....BBBBBB.....', '...BBBBBBBBBB...', '.BBBBEBBBBEBBBB.', 'BBBBBEBBBBEBBBBB', '.BBBBBBBBBBBBBB.', '...BBBBBBBBBB...', '.....BBBBBB.....', '......BBBB......', '.......BB.......']},
@@ -49,7 +49,7 @@ const mix = (a: string, b: string, t: number) => {
   const [x, y] = [p(a), p(b)];
   return `rgb(${x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(',')})`;
 };
-const Pixels: React.FC<{sprite: Sprite; x?: number; y?: number; rowsShown?: number; blink?: boolean; beaconOn?: boolean}> = ({sprite, x = 0, y = 0, rowsShown = 99, blink = false, beaconOn = true}) => {
+export const Pixels: React.FC<{sprite: Sprite; x?: number; y?: number; rowsShown?: number; blink?: boolean; beaconOn?: boolean}> = ({sprite, x = 0, y = 0, rowsShown = 99, blink = false, beaconOn = true}) => {
   const out: React.ReactNode[] = [];
   const total = sprite.rows.length;
   sprite.rows.forEach((row, ry) => {
@@ -68,8 +68,8 @@ const Pixels: React.FC<{sprite: Sprite; x?: number; y?: number; rowsShown?: numb
   return <>{out}</>;
 };
 
-type Mood = 'working' | 'open' | 'asking';
-const Agent: React.FC<{name: string; mood: Mood; size: number; frame: number; seed?: number}> = ({name, mood, size, frame, seed = 0}) => {
+export type Mood = 'working' | 'open' | 'asking';
+export const Agent: React.FC<{name: string; mood: Mood; size: number; frame: number; seed?: number}> = ({name, mood, size, frame, seed = 0}) => {
   const sprite = SPRITES[name];
   const raw = sprite.colors.B;
   const body = Array.isArray(raw) ? raw[1] : raw;
@@ -103,7 +103,7 @@ const Agent: React.FC<{name: string; mood: Mood; size: number; frame: number; se
   );
 };
 
-const ShedLogo: React.FC<{size: number; frame: number; rowsShown?: number; tile?: boolean}> = ({size, frame, rowsShown = 99, tile = true}) => (
+export const ShedLogo: React.FC<{size: number; frame: number; rowsShown?: number; tile?: boolean}> = ({size, frame, rowsShown = 99, tile = true}) => (
   <svg viewBox="0 0 20 20" width={size} height={size} shapeRendering="crispEdges" style={{display: 'block', overflow: 'visible'}}>
     {tile && <rect width={20} height={20} rx={4} fill="#374238" />}
     <Pixels sprite={SHED} x={2} y={1} rowsShown={rowsShown} beaconOn={Math.floor(frame / 20) % 2 === 0} />
@@ -112,20 +112,20 @@ const ShedLogo: React.FC<{size: number; frame: number; rowsShown?: number; tile?
 );
 
 // ---------- helpers ----------
-const ease = (frame: number, from: number, to: number, a = 0, b = 1) => interpolate(frame, [from, to], [a, b], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
-const typed = (text: string, frame: number, start: number, cps = 1.4) => text.slice(0, Math.max(0, Math.floor((frame - start) * cps)));
-const Rise: React.FC<{frame: number; at: number; children: React.ReactNode; style?: React.CSSProperties}> = ({frame, at, children, style}) => {
+export const ease = (frame: number, from: number, to: number, a = 0, b = 1) => interpolate(frame, [from, to], [a, b], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+export const typed = (text: string, frame: number, start: number, cps = 1.4) => text.slice(0, Math.max(0, Math.floor((frame - start) * cps)));
+export const Rise: React.FC<{frame: number; at: number; children: React.ReactNode; style?: React.CSSProperties}> = ({frame, at, children, style}) => {
   const {fps} = useVideoConfig();
   const s = spring({frame: frame - at, fps, config: {damping: 200}});
   return <div style={{opacity: s, transform: `translateY(${(1 - s) * 24}px)`, ...style}}>{children}</div>;
 };
-const Eyebrow: React.FC<{children: React.ReactNode; color?: string}> = ({children, color = C.mint}) => (
+export const Eyebrow: React.FC<{children: React.ReactNode; color?: string}> = ({children, color = C.mint}) => (
   <div style={{fontFamily: F.pixel, fontSize: 22, letterSpacing: '.08em', textTransform: 'uppercase', color}}>{children}</div>
 );
-const Headline: React.FC<{children: React.ReactNode; size?: number}> = ({children, size = 76}) => (
+export const Headline: React.FC<{children: React.ReactNode; size?: number}> = ({children, size = 76}) => (
   <div style={{fontFamily: F.display, fontWeight: 800, fontSize: size, lineHeight: 1.02, letterSpacing: '-0.03em', color: C.cream}}>{children}</div>
 );
-const Stars: React.FC<{frame: number}> = ({frame}) => (
+export const Stars: React.FC<{frame: number}> = ({frame}) => (
   <svg width={1920} height={1080} style={{position: 'absolute', inset: 0}}>
     {Array.from({length: 46}, (_, i) => {
       const x = (i * 397) % 1920, y = (i * 211) % 620;
@@ -136,7 +136,7 @@ const Stars: React.FC<{frame: number}> = ({frame}) => (
 );
 
 // ---------- devices ----------
-const TerminalWindow: React.FC<{title: string; children: React.ReactNode; style?: React.CSSProperties; fontSize?: number}> = ({title, children, style, fontSize = 22}) => (
+export const TerminalWindow: React.FC<{title: string; children: React.ReactNode; style?: React.CSSProperties; fontSize?: number}> = ({title, children, style, fontSize = 22}) => (
   <div style={{background: C.term, border: `2px solid ${C.line}`, borderRadius: 16, overflow: 'hidden', boxShadow: '0 40px 90px #0009', ...style}}>
     <div style={{display: 'flex', alignItems: 'center', gap: 9, padding: '14px 18px', borderBottom: `2px solid ${C.line}`, fontFamily: F.mono, fontSize: 17, color: C.muted}}>
       <i style={{width: 13, height: 13, borderRadius: '50%', background: '#3a4740'}} /><i style={{width: 13, height: 13, borderRadius: '50%', background: '#3a4740'}} /><i style={{width: 13, height: 13, borderRadius: '50%', background: '#3a4740'}} />
@@ -145,9 +145,9 @@ const TerminalWindow: React.FC<{title: string; children: React.ReactNode; style?
     <div style={{padding: '18px 22px', fontFamily: F.mono, fontSize, lineHeight: 1.55, color: '#d9e4dc', whiteSpace: 'pre-wrap'}}>{children}</div>
   </div>
 );
-const Caret: React.FC<{frame: number}> = ({frame}) => <span style={{display: 'inline-block', width: 11, height: 22, background: C.mint, verticalAlign: -3, opacity: Math.floor(frame / 15) % 2 ? 0 : 1}} />;
+export const Caret: React.FC<{frame: number}> = ({frame}) => <span style={{display: 'inline-block', width: 11, height: 22, background: C.mint, verticalAlign: -3, opacity: Math.floor(frame / 15) % 2 ? 0 : 1}} />;
 
-const PhoneCard: React.FC<{agent: string; mood: Mood; project: string; frame: number; seed?: number}> = ({agent, mood, project, frame, seed}) => {
+export const PhoneCard: React.FC<{agent: string; mood: Mood; project: string; frame: number; seed?: number}> = ({agent, mood, project, frame, seed}) => {
   const status = {working: ['Typing away', '#4e7a62'], open: ['Waiting for you', '#8a8579'], asking: ['Needs your OK', '#b25b3d']}[mood];
   return (
     <div style={{background: '#fffdf8', border: `2px solid ${mood === 'asking' ? '#e7b9a6' : '#e3dccf'}`, borderRadius: 20, overflow: 'hidden', boxShadow: mood === 'asking' ? '0 0 0 5px #f5e7df' : 'none'}}>
@@ -159,13 +159,13 @@ const PhoneCard: React.FC<{agent: string; mood: Mood; project: string; frame: nu
     </div>
   );
 };
-const Phone: React.FC<{children: React.ReactNode; style?: React.CSSProperties; scale?: number}> = ({children, style, scale = 1}) => (
+export const Phone: React.FC<{children: React.ReactNode; style?: React.CSSProperties; scale?: number}> = ({children, style, scale = 1}) => (
   <div style={{position: 'relative', width: 430, height: 880, borderRadius: 62, background: C.paper, padding: 22, boxShadow: '0 50px 110px #000b, 0 0 0 16px #0b0f0d, 0 0 0 18px #33443a', transform: `scale(${scale})`, ...style}}>
     <div style={{display: 'flex', justifyContent: 'space-between', fontFamily: F.body, fontWeight: 500, fontSize: 19, color: '#6d6a62', padding: '6px 14px 14px'}}><span>9:41</span><span>Shed</span></div>
     {children}
   </div>
 );
-const MessageBar: React.FC<{text: string; pressed?: boolean; placeholder?: boolean; agent?: string; agentLit?: boolean}> = ({text, pressed, placeholder, agent = '✦ Auto', agentLit}) => (
+export const MessageBar: React.FC<{text: string; pressed?: boolean; placeholder?: boolean; agent?: string; agentLit?: boolean}> = ({text, pressed, placeholder, agent = '✦ Auto', agentLit}) => (
   <div style={{display: 'flex', alignItems: 'center', gap: 10, background: '#fffdf8', border: '2px solid #ddd3c6', borderRadius: 34, padding: '9px 9px 9px 16px', fontFamily: F.body, fontSize: 21}}>
     <span style={{border: `2px solid ${agentLit ? '#a6573d' : '#e1d9cb'}`, borderRadius: 20, padding: '4px 12px', fontSize: 18, color: C.ink, background: agentLit ? '#f5e7df' : '#f1efe9', whiteSpace: 'nowrap'}}>{agent}</span>
     <span style={{flex: 1, color: placeholder ? '#9a958b' : C.ink, whiteSpace: 'nowrap', overflow: 'hidden'}}>{text}</span>
@@ -232,7 +232,7 @@ const Desk: React.FC = () => {
 
 
 // ---------- new: starting agents from the phone ----------
-const DeskCard: React.FC<{agent: string; mood: Mood; project: string; harness: string; frame: number; seed?: number; pop?: number}> = ({agent, mood, project, harness, frame, seed, pop = 1}) => {
+export const DeskCard: React.FC<{agent: string; mood: Mood; project: string; harness: string; frame: number; seed?: number; pop?: number}> = ({agent, mood, project, harness, frame, seed, pop = 1}) => {
   const status = {working: ['Typing away', '#4e7a62'], open: ['Waiting for you', '#8a8579'], asking: ['Needs your OK', '#b25b3d']}[mood];
   return (
     <div style={{transform: `scale(${pop})`, opacity: Math.min(1, pop * 1.4), transformOrigin: '50% 60%', background: '#fffdf8', border: '2px solid #e3dccf', borderRadius: 18, overflow: 'hidden'}}>
@@ -345,14 +345,14 @@ const AddAgents: React.FC = () => {
 };
 
 // ---------- new: chatting with an agent ----------
-const ChatBubble: React.FC<{who: 'you' | 'claude'; children: React.ReactNode; label?: string; status?: string; fade?: number}> = ({who, children, label, status, fade = 1}) => (
+export const ChatBubble: React.FC<{who: 'you' | 'claude'; children: React.ReactNode; label?: string; status?: string; fade?: number}> = ({who, children, label, status, fade = 1}) => (
   <div style={{opacity: fade, marginBottom: 14}}>
     <div style={{fontFamily: F.mono, fontSize: 14, letterSpacing: '.06em', color: who === 'you' ? '#a6573d' : '#8a8579', marginBottom: 6}}>{label || (who === 'you' ? 'YOU' : 'CLAUDE')}</div>
     <div style={{fontFamily: F.body, fontSize: 18.5, lineHeight: 1.5, color: C.ink, background: who === 'you' ? '#f5e7df' : '#fffdf8', border: `2px solid ${who === 'you' ? '#ecd5c8' : '#e3dccf'}`, borderRadius: 14, padding: '11px 14px'}}>{children}</div>
     {status && <div style={{textAlign: 'right', fontFamily: F.mono, fontSize: 14, color: '#4e7a62', marginTop: 5}}>{status}</div>}
   </div>
 );
-const FileChip: React.FC<{icon: string; name: string; size: string; pop?: number}> = ({icon, name, size, pop = 1}) => (
+export const FileChip: React.FC<{icon: string; name: string; size: string; pop?: number}> = ({icon, name, size, pop = 1}) => (
   <div style={{display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 8, padding: '6px 12px', border: '2px solid #e3d3c6', borderRadius: 999, background: '#fffdf8', fontFamily: F.body, fontSize: 16, color: C.ink, transform: `scale(${pop})`, transformOrigin: 'left center'}}>
     <span style={{color: '#a6573d'}}>{icon}</span>{name}<span style={{fontFamily: F.mono, fontSize: 13, color: '#8a8579'}}>{size}</span>
   </div>

@@ -1,0 +1,205 @@
+{
+  "p-home": {
+    "file": "product/p-home.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "input": {
+        "x": 195,
+        "y": 803,
+        "w": 256,
+        "h": 36
+      }
+    }
+  },
+  "p-typed": {
+    "file": "product/p-typed.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "send": {
+        "x": 349,
+        "y": 803,
+        "w": 36,
+        "h": 36
+      }
+    }
+  },
+  "p-sent": {
+    "file": "product/p-sent.png",
+    "width": 390,
+    "height": 844,
+    "taps": {}
+  },
+  "p-asking": {
+    "file": "product/p-asking.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "yes": {
+        "x": 196,
+        "y": 659,
+        "w": 365,
+        "h": 44
+      }
+    }
+  },
+  "p-approved": {
+    "file": "product/p-approved.png",
+    "width": 390,
+    "height": 844,
+    "taps": {}
+  },
+  "p-chat": {
+    "file": "product/p-chat.png",
+    "width": 390,
+    "height": 844,
+    "taps": {}
+  },
+  "p-files": {
+    "file": "product/p-files.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "preview": {
+        "x": 147,
+        "y": 259,
+        "w": 252,
+        "h": 38
+      }
+    }
+  },
+  "p-files-preview": {
+    "file": "product/p-files-preview.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "download": {
+        "x": 327,
+        "y": 259,
+        "w": 87,
+        "h": 40
+      }
+    }
+  },
+  "p-attach": {
+    "file": "product/p-attach.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "clip": {
+        "x": 41,
+        "y": 803,
+        "w": 36,
+        "h": 36
+      }
+    }
+  },
+  "p-model": {
+    "file": "product/p-model.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "model": {
+        "x": 174,
+        "y": 736,
+        "w": 84,
+        "h": 36
+      },
+      "harness": {
+        "x": 73,
+        "y": 736,
+        "w": 101,
+        "h": 36
+      }
+    }
+  },
+  "p-talk-reply": {
+    "file": "product/p-talk-reply.png",
+    "width": 390,
+    "height": 844,
+    "taps": {}
+  },
+  "p-talk-top": {
+    "file": "product/p-talk-top.png",
+    "width": 390,
+    "height": 844,
+    "taps": {}
+  },
+  "p-talk-button": {
+    "file": "product/p-talk-button.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "talk": {
+        "x": 97,
+        "y": 466,
+        "w": 154,
+        "h": 40
+      }
+    }
+  },
+  "p-talk-dialog": {
+    "file": "product/p-talk-dialog.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "send": {
+        "x": 106,
+        "y": 610,
+        "w": 119,
+        "h": 33
+      }
+    }
+  },
+  "p-home-talk": {
+    "file": "product/p-home-talk.png",
+    "width": 390,
+    "height": 844,
+    "taps": {}
+  },
+  "p-settings-idle": {
+    "file": "product/p-settings-idle.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "toggle": {
+        "x": 53,
+        "y": 706,
+        "w": 13,
+        "h": 13
+      }
+    }
+  },
+  "p-settings-share": {
+    "file": "product/p-settings-share.png",
+    "width": 390,
+    "height": 844,
+    "taps": {
+      "get": {
+        "x": 98,
+        "y": 569,
+        "w": 112,
+        "h": 33
+      }
+    }
+  },
+  "d-home": {
+    "file": "product/d-home.png",
+    "width": 1600,
+    "height": 1000,
+    "taps": {}
+  },
+  "d-home-talk": {
+    "file": "product/d-home-talk.png",
+    "width": 1600,
+    "height": 1000,
+    "taps": {}
+  },
+  "d-drawer-talk": {
+    "file": "product/d-drawer-talk.png",
+    "width": 1600,
+    "height": 1000,
+    "taps": {}
+  }
+}
