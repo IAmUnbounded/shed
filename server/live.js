@@ -10,6 +10,7 @@ const askingPatterns = {
 };
 // Mid-turn, both CLIs show "esc to interrupt" in their footer, even while waiting on their own tools or background work.
 const activePattern = /esc to interrupt|Working \(/i;
+export const activeOnScreen = screen => activePattern.test(screen || '');
 // Claude's footer names its permission mode (Shift+Tab changes it mid-session); with no mode named it asks first.
 // Only a screen showing the input box counts, since a question or menu hides the footer.
 export function footerMode(screen) {

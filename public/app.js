@@ -14,23 +14,36 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '
 const relative = date => { const diff = Math.max(0, Date.now() - Date.parse(date)); const m = Math.floor(diff / 60000); return m < 1 ? 'now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : m < 10080 ? `${Math.floor(m / 1440)}d ago` : new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
 const projectName = cwd => cwd ? cwd.split('/').filter(Boolean).pop() : 'Unknown project';
 // When the Mac starts serving a newer Shed, reload, unless something is being typed (then offer a Reload button).
-let loadedVersion = '', updatePending = false;
+let loadedVersion = document.querySelector('meta[name="shed-version"]')?.content || '', updatePending = false;
+// The app's files are kept on the phone by the service worker (sw.js) so it opens without waiting for the tunnel.
+// When the Mac runs a newer Shed, every file is fetched fresh first, all of them, then stored together, then the page
+// reloads, so a reload never mixes old and new files.
+const SHELL_CACHE = 'shed-shell-v1', SHELL_FILES = ['/', '/app.js', '/markdown.js', '/styles.css', '/theme.css', '/logo.svg', '/manifest.webmanifest'];
+async function reloadFresh() {
+  try {
+    if (window.caches) {
+      const fresh = await Promise.all(SHELL_FILES.map(url => fetch(url, { cache:'no-store' })));
+      if (fresh.every(r => r.ok)) { const cache = await caches.open(SHELL_CACHE); await Promise.all(fresh.map((r, i) => cache.put(SHELL_FILES[i], r))); }
+    }
+  } catch { /* The reload below still fetches what the cache can't give. */ }
+  location.reload();
+}
 function noticeVersion(version) {
   if (!version) return;
   if (!loadedVersion) { loadedVersion = version; return; }
   if (version === loadedVersion || updatePending) return;
   updatePending = true;
   const typing = ['#phone-message-input', '#followup-prompt', '#prompt', '#terminal-prompt', '#phone-workspace'].some(sel => document.querySelector(sel)?.value?.trim());
-  if (!typing) return location.reload();
+  if (!typing) return reloadFresh();
   document.getElementById('update-banner')?.classList.remove('hidden');
 }
-document.getElementById('update-reload')?.addEventListener('click', () => location.reload());
+document.getElementById('update-reload')?.addEventListener('click', () => reloadFresh());
 // While the Mac is restarting Shed or is unreachable, requests fail fast and a small banner says so, instead of the
 // page silently hanging. The banner clears on the next request that gets through.
 function setOffline(offline) { document.getElementById('reconnecting')?.classList.toggle('hidden', !offline); }
 async function api(url, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
+  const timer = setTimeout(() => controller.abort(), options.timeout || 20000);
   let res;
   try { res = await fetch(url, { credentials:'same-origin', headers:{ 'Content-Type':'application/json' }, signal:controller.signal, ...options }); }
   catch (error) { setOffline(true); throw new Error(error.name === 'AbortError' ? 'Your Mac is taking too long to answer. Try again in a moment.' : 'Cannot reach your Mac right now. Shed may be restarting.'); }
@@ -40,7 +53,7 @@ async function api(url, options = {}) {
   catch { setOffline(res.status >= 500); throw new Error(res.status >= 500 ? 'Cannot reach your Mac right now. Shed may be restarting.' : 'Unexpected response from your Mac.'); }
   setOffline(false);
   noticeVersion(res.headers.get('X-Shed-Version'));
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  if (!res.ok) throw Object.assign(new Error(data.error || 'Request failed'), { data });
   return data;
 }
 function symbol(harness) { return `<span class="harness-symbol ${escapeHtml(harness)}">${({codex:'◇',claude:'✳',gemini:'✦',pi:'π',opencode:'◎'})[harness] || '?'}</span>`; }
@@ -71,7 +84,7 @@ async function showAuth() {
   } catch {}
 }
 function hideAuth() { $('#auth-screen').classList.add('hidden'); }
-function setView(view) { state.view = view; if (view === 'settings') { loadShareSettings(); prepareShareLink(); loadAutoClose(); } $('#phone-message').classList.toggle('hidden', view !== 'inbox'); $$('.view').forEach(el => el.classList.toggle('hidden', el.id !== `view-${view}`)); $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('#page-name').textContent = ({ inbox:'Command center', sessions:'Sessions', activity:'Activity', settings:'Settings' })[view]; const url = new URL(location.href); if (view === 'inbox') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.replaceState(null, '', url); document.querySelector('.sidebar').classList.remove('open'); $('#mobile-scrim').classList.add('hidden'); render(); }
+function setView(view) { state.view = view; if (view === 'settings') { loadShareSettings(); prepareShareLink(); loadAutoClose(); loadAutoRoute(); loadBranchSetting(); } $('#phone-message').classList.toggle('hidden', view !== 'inbox'); $$('.view').forEach(el => el.classList.toggle('hidden', el.id !== `view-${view}`)); $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('#page-name').textContent = ({ inbox:'Command center', sessions:'Sessions', activity:'Activity', settings:'Settings' })[view]; const url = new URL(location.href); if (view === 'inbox') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.replaceState(null, '', url); document.querySelector('.sidebar').classList.remove('open'); $('#mobile-scrim').classList.add('hidden'); render(); }
 function renderHarnesses() {
   const names = { codex:'Codex', claude:'Claude Code', gemini:'Gemini', pi:'Pi', opencode:'OpenCode' };
   const labels = { ready:'READY', needs_auth:'SIGN IN', offline:'OFFLINE', unknown:'CHECK', checking:'CHECKING' };
@@ -176,12 +189,11 @@ const PERMISSIONS = {
   ask:['', 'Asks before acting'],
 };
 // An open Claude session gets a picker: Shed presses Shift+Tab in its Terminal until Claude shows the chosen mode.
-const PICKABLE = [['ask', 'Ask before acting'], ['edits', 'Accept edits, ask before commands'], ['plan', 'Plan only, change nothing'], ['auto', 'Auto: checks risky actions itself']];
+const PICKABLE = [['ask', 'Ask before acting'], ['edits', 'Accept edits, ask before commands'], ['plan', 'Plan only, change nothing'], ['auto', 'Auto: checks risky actions itself'], ['skip', 'Skip permissions: never asks']];
 function permissionLine(session) {
   if (session.harness === 'claude' && session.tty) {
     const current = session.permissions || 'ask';
-    const options = PICKABLE.map(([id, text]) => `<option value="${id}"${id === current ? ' selected' : ''}>${text}</option>`).join('')
-      + (current === 'skip' ? '<option value="skip" selected disabled>Skipping permissions (set when it started)</option>' : '');
+    const options = PICKABLE.map(([id, text]) => `<option value="${id}"${id === current ? ' selected' : ''}>${text}</option>`).join('');
     return `<label class="permission-pick ${escapeHtml(current)}">Permissions <select id="permission-select" data-session="${escapeHtml(session.id)}" aria-label="Permission mode">${options}</select></label>`;
   }
   const mode = PERMISSIONS[session.permissions];
@@ -407,7 +419,29 @@ function connectEvents() {
   events.addEventListener('exchanges', () => refresh());
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && $('#auth-screen').classList.contains('hidden')) { connectEvents(); refresh(); loadTerminal(); } });
-async function init() { try { const me = await api('/api/me'); Object.assign(state, me); hideAuth(); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); await Promise.all([refresh(), loadModels(), refreshHarnessHealth(), loadConnect()]); setupPush(); loadDevices(); loadPro(); connectEvents(); openFromUrl(location.href); $('#phone-message').classList.toggle('hidden', state.view !== 'inbox'); const requestedView = new URL(location.href).searchParams.get('view'); if (['sessions','activity','settings'].includes(requestedView)) setView(requestedView); } catch (error) { if (error.message === 'Authentication required.') showAuth(); else showFeedback(error.message); } }
+// Opening takes one request (/api/bootstrap). Before it answers, the lists last seen on this device are drawn from its
+// own cache, so the app shows your sessions at once instead of a blank page while the tunnel connects.
+const BOOT_CACHE = 'shed-boot';
+function applyBoot(boot, fromCache = false) {
+  Object.assign(state, boot.me);
+  state.sessions = boot.sessions; state.tasks = boot.tasks; state.exchanges = boot.exchanges || []; state.health = boot.harnesses || {};
+  if (!fromCache) { state.v.sessions = boot.sessionsV; state.v.tasks = boot.tasksV; }
+  modelState.configs = boot.models;
+  hideAuth(); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); syncPhoneHarness();
+  renderModelChoices(); setEditorHarness($('#model-editor-harness').value); renderProjects(); render();
+}
+function forgetBoot() { try { localStorage.removeItem(BOOT_CACHE); } catch { /* Private mode. */ } }
+async function init() {
+  try { const cached = JSON.parse(localStorage.getItem(BOOT_CACHE) || 'null'); if (cached?.me) applyBoot(cached, true); } catch { /* No cache; wait for the Mac. */ }
+  try {
+    const boot = await api('/api/bootstrap');
+    applyBoot(boot);
+    try { localStorage.setItem(BOOT_CACHE, JSON.stringify(boot)); } catch { /* Full or private: the next open just waits for the Mac. */ }
+    loadConnect(); setupPush(); loadDevices(); loadPro(); connectEvents(); openFromUrl(location.href);
+    $('#phone-message').classList.toggle('hidden', state.view !== 'inbox');
+    const requestedView = new URL(location.href).searchParams.get('view'); if (['sessions','activity','settings'].includes(requestedView)) setView(requestedView);
+  } catch (error) { if (error.message === 'Authentication required.') { forgetBoot(); showAuth(); } else showFeedback(error.message); }
+}
 async function previewRoute() { const prompt = $('#prompt').value.trim(); if (prompt.length < 9) { $('#route-preview').classList.add('hidden'); return; } try { const selectedProject = $('#project-select').value; const data = await api('/api/route', { method:'POST', body:JSON.stringify({prompt, harness:$('#harness-select').value, model:$('#model-select').value, cwd:selectedProject === '__new__' ? '' : selectedProject, newWorkspace:selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:true}) }); if ($('#prompt').value.trim() !== prompt) return; const route = data.route; $('#route-preview').innerHTML = `<span class="route-symbol">✦</span><span><b>Local preview:</b> New ${escapeHtml(route.harness)} session · ${escapeHtml(route.reason)} · ${escapeHtml(route.model || 'harness default')} model</span>`; $('#route-preview').classList.remove('hidden'); } catch { $('#route-preview').classList.add('hidden'); } }
 async function sendTask(prompt, options = {}) { const attachKey = options.sessionId ? 'followup' : options.phone ? 'phone' : 'new', files = attached[attachKey]; if (files.some(f => f.status === 'uploading')) { showFeedback('Wait for the files to finish uploading.'); return false; } if (!prompt.trim() && !files.length) return; const button = options.sessionId ? $('#followup-send') : $('#send-button'); button.disabled = true; try { const selectedProject = $('#project-select').value; const isNew = !options.sessionId; if (files.some(f => f.status === 'failed')) throw new Error('Remove the files that failed to upload, then send again.'); const {task} = await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, harness:options.harness || $('#harness-select').value, model:options.model ?? (options.sessionId ? $('#followup-model').value : $('#model-select').value), cwd:options.cwd ?? (selectedProject === '__new__' ? '' : selectedProject), newWorkspace:isNew && selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:isNew, sessionId:options.sessionId || null, followup:options.followup || 'auto', attachments:files.map(f => f.id), skipPermissions:options.sessionId ? $('#followup-skip').checked : $('#skip-permissions').checked }) }); attached[attachKey] = []; renderAttachments(attachKey); $('#prompt').value = ''; $('#followup-prompt').value = ''; $('#followup-prompt').style.height = ''; state.followupPreviewKey = null; $('#followup-preview').classList.add('hidden'); $('#new-workspace').value = ''; $('#route-preview').classList.add('hidden');
   if (options.sessionId && !task.handoffFrom) { state.pending.push({ taskId:task.id, sessionId:options.sessionId, text:prompt.trim(), at:Date.now() }); state.pinBottom = true; await refresh(); return true; }
@@ -436,10 +470,12 @@ function showPane(pane) {
   $('#drawer-content').classList.toggle('hidden', pane !== 'conversation');
   $('#drawer-terminal').classList.toggle('hidden', pane !== 'terminal');
   $('#drawer-files').classList.toggle('hidden', pane !== 'files');
+  $('#drawer-changes').classList.toggle('hidden', pane !== 'changes');
   $('.drawer-composer').classList.toggle('in-terminal', pane !== 'conversation');
   $('#detail-drawer').classList.toggle('wide', pane === 'terminal');
   if (pane === 'terminal') setTimeout(() => loadTerminal(true), 0); // after openDrawer() has made the drawer visible
   if (pane === 'files') loadFiles();
+  if (pane === 'changes') loadChanges();
 }
 // Devices signed in to Shed. Pending ones can only be approved on the Mac.
 async function loadDevices() {
@@ -543,9 +579,18 @@ $('#share-copy-key').addEventListener('click', () => manualKey ? copyText(manual
 $('#followup-permissions').addEventListener('change', async e => {
   const select = e.target.closest('#permission-select');
   if (!select) return;
+  const url = `/api/sessions/${encodeURIComponent(select.dataset.session)}/permissions`, target = select.value;
+  const done = mode => showFeedback(`Now: ${PICKABLE.find(([id]) => id === mode)?.[1] || mode}.`);
+  if (target === 'skip' && !confirm('Skip permissions? Claude will edit files, run commands and use the web on this Mac without asking.')) { $('#followup-permissions').dataset.line = ''; if (state.selectedSession) openSession(state.selectedSession.id, true); return; }
   select.disabled = true; showFeedback('Switching Claude\'s mode in its Terminal…');
-  try { const { mode } = await api(`/api/sessions/${encodeURIComponent(select.dataset.session)}/permissions`, { method:'POST', body:JSON.stringify({ mode:select.value }) }); showFeedback(`Now: ${PICKABLE.find(([id]) => id === mode)?.[1] || mode}.`); }
-  catch (error) { showFeedback(error.message); }
+  try { done((await api(url, { method:'POST', body:JSON.stringify({ mode:target }), timeout:60000 })).mode); }
+  catch (error) {
+    // Started without the option to skip: Claude is restarted in the same tab with skip on, and the conversation carries on.
+    if (error.data?.restart && confirm('This session was started without the option to skip permissions. Restart Claude in its Terminal with permissions skipped? The conversation carries on where it left off.')) {
+      showFeedback('Restarting Claude with permissions skipped…');
+      try { done((await api(url, { method:'POST', body:JSON.stringify({ mode:'skip', restart:true }), timeout:60000 })).mode); } catch (again) { showFeedback(again.message); }
+    } else showFeedback(error.message);
+  }
   select.disabled = false; select.blur(); $('#followup-permissions').dataset.line = '';
   if (state.selectedSession) openSession(state.selectedSession.id, true);
 });
@@ -611,6 +656,19 @@ $('#notify-test').addEventListener('click', async () => {
 ['notify-finished', 'notify-asking'].forEach(id => $(`#${id}`).addEventListener('change', () => api('/api/push/prefs', { method:'POST', body:JSON.stringify({ finished:$('#notify-finished').checked, asking:$('#notify-asking').checked }) }).catch(error => showFeedback(error.message))));
 async function loadAutoClose() { try { const { prefs } = await api('/api/autoclose'); $('#autoclose-enabled').checked = prefs.enabled; } catch { /* Settings still work without it. */ } }
 $('#autoclose-enabled').addEventListener('change', () => api('/api/autoclose', { method:'POST', body:JSON.stringify({ enabled:$('#autoclose-enabled').checked }) }).catch(error => showFeedback(error.message)));
+const HARNESS_NAMES = { codex:'Codex', claude:'Claude Code', gemini:'Gemini', pi:'Pi', opencode:'OpenCode' };
+async function loadAutoRoute() {
+  try {
+    const { prefs } = await api('/api/autoroute');
+    const list = $('#autoroute-list'); list.replaceChildren();
+    for (const [name, title] of Object.entries(HARNESS_NAMES)) {
+      const label = document.createElement('label'), box = document.createElement('input');
+      box.type = 'checkbox'; box.value = name; box.checked = !prefs.off.includes(name);
+      label.append(box, ` ${title}`); list.append(label);
+    }
+  } catch { /* Settings still work without it. */ }
+}
+$('#autoroute-list').addEventListener('change', () => api('/api/autoroute', { method:'POST', body:JSON.stringify({ off:$$('#autoroute-list input').filter(box => !box.checked).map(box => box.value) }) }).catch(error => showFeedback(error.message)));
 async function setupPush() {
   if ('serviceWorker' in navigator && window.isSecureContext) {
     try { push.registration = await navigator.serviceWorker.register('/sw.js'); } catch { push.supported = false; }
@@ -675,6 +733,126 @@ $('#drawer-files').addEventListener('click', e => {
     : `<a class="text-action" href="${src}" target="_blank" rel="noopener">Open ${escapeHtml(f.path.split('/').pop())} ↗</a>`;
   preview.classList.remove('hidden');
 });
+// Changes: what the session's agent changed in its project, as git sees it. Tap a file for its diff, tap a line to send
+// a comment back to the agent, and commit / push / open a pull request without leaving the phone.
+state.changes = { id:'', v:'', data:null, open:new Set(), diffs:new Map() };
+const changesBase = () => `/api/sessions/${encodeURIComponent(state.selectedSession.id)}`;
+async function loadChanges(quiet = false) {
+  const session = state.selectedSession, box = $('#drawer-changes');
+  if (!session?.cwd) return;
+  const c = state.changes;
+  if (!c.data && !quiet) box.innerHTML = '<div class="files-empty">Reading git…</div>';
+  try {
+    const data = await api(`${changesBase()}/changes?v=${c.v}`);
+    if (state.selectedSession?.id !== session.id) return;
+    if (!data.same) { c.v = data.v; c.data = data; for (const file of c.diffs.keys()) c.diffs.delete(file); }
+    const count = c.data.repo ? c.data.files.length : 0;
+    $('#changes-count').textContent = count; $('#changes-count').classList.toggle('hidden', !count);
+    if (state.pane === 'changes' && (!data.same || !box.dataset.drawn)) { renderChanges(); for (const file of c.open) loadDiff(file); }
+    if (state.pane === 'changes' && c.data.repo && (!c.pr || Date.now() - c.pr.at > 20000)) loadPr();
+  } catch (error) { if (!quiet) box.innerHTML = `<div class="files-empty">${escapeHtml(error.message)}</div>`; }
+}
+async function loadPr(fresh = false) {
+  const c = state.changes, id = c.id;
+  c.pr = { at:Date.now(), value:c.pr?.value };
+  try { const { pr } = await api(`${changesBase()}/pr${fresh ? '?fresh=1' : ''}`); if (state.changes.id === id) { c.pr.value = pr; renderPr(); } } catch { /* PR status is extra. */ }
+}
+function renderPr() {
+  const line = $('#pr-line'), pr = state.changes.pr?.value;
+  if (!line) return;
+  if (!pr) { line.innerHTML = ''; return; }
+  if (pr.error) { line.innerHTML = `<span class="pr-note">${escapeHtml(pr.error)}</span>`; return; }
+  const ck = pr.checks, failed = ck.failed.length;
+  const checks = ck.total ? `<span class="pr-checks">${ck.passed ? `<i class="ok">✓ ${ck.passed}</i>` : ''}${failed ? `<i class="bad">✗ ${failed}</i>` : ''}${ck.pending ? `<i class="wait">◷ ${ck.pending}</i>` : ''}</span>` : '';
+  line.innerHTML = `<a class="pr-chip ${escapeHtml(pr.state.toLowerCase())}" href="${escapeHtml(pr.url)}" target="_blank" rel="noopener">#${pr.number} ${pr.draft ? 'Draft' : escapeHtml(pr.state[0] + pr.state.slice(1).toLowerCase())} ↗</a>${checks}${failed ? '<button class="text-action" type="button" id="fix-checks">Fix failing checks</button>' : ''}`;
+}
+const commitSubject = session => { const line = topicLine(session.title || '').replace(/…$/, ''); return (line[0] || '').toUpperCase() + line.slice(1, 72); };
+function renderChanges() {
+  const c = state.changes, d = c.data, box = $('#drawer-changes'), session = state.selectedSession;
+  box.dataset.drawn = '1';
+  if (!d.repo) { box.innerHTML = '<div class="files-empty">This project is not a git repository, so there are no changes to review.</div>'; return; }
+  const message = $('#commit-message')?.value ?? commitSubject(session);
+  const where = d.branch ? `<span class="branch">⎇ ${escapeHtml(d.branch)}</span>` : '<span class="branch">detached checkout</span>';
+  const sync = d.upstream ? `${d.ahead ? `<span>↑${d.ahead}</span>` : ''}${d.behind ? `<span>↓${d.behind}</span>` : ''}${!d.ahead && !d.behind ? '<span>up to date</span>' : ''}` : d.branch ? '<span>not pushed yet</span>' : '';
+  const rows = d.files.map(f => {
+    const slash = f.path.lastIndexOf('/'), name = f.path.slice(slash + 1), dir = slash >= 0 ? f.path.slice(0, slash + 1) : '';
+    const open = c.open.has(f.path);
+    return `<div class="change-row${open ? ' open' : ''}" data-path="${escapeHtml(f.path)}"><button class="change-main" type="button"><span class="change-status s-${f.status === '?' ? 'new' : f.status}">${f.status === '?' ? 'N' : f.status}</span><span class="change-name"><b>${escapeHtml(name)}</b><small>${escapeHtml(f.oldPath ? `from ${f.oldPath}` : dir)}</small></span><span class="change-stat">${f.binary ? '<i>binary</i>' : `${f.additions ? `<i class="add">+${f.additions}</i>` : ''}${f.deletions ? `<i class="del">−${f.deletions}</i>` : ''}`}</span></button><div class="change-diff${open ? '' : ' hidden'}">${open ? diffHtml(f.path) : ''}</div></div>`;
+  }).join('');
+  const nothing = !d.files.length;
+  box.innerHTML = `<div class="changes-head"><div class="branch-line">${where}${sync}</div><div class="pr-line" id="pr-line"></div></div>
+    ${nothing ? `<div class="files-empty">No uncommitted changes.${d.head ? ` Last commit: <b>${escapeHtml(d.head.subject)}</b>.` : ''}</div>` : `<div class="changes-summary">${d.files.length} file${d.files.length === 1 ? '' : 's'} changed${d.more ? ` (and ${d.more} more)` : ''} <i class="add">+${d.additions}</i> <i class="del">−${d.deletions}</i><button class="text-action" type="button" id="send-back">Send back with a note</button></div><div class="change-list">${rows}</div>`}
+    <form class="ship-box" id="ship-box">${nothing ? '' : `<input id="commit-message" maxlength="200" autocomplete="off" aria-label="Commit message" placeholder="Commit message" value="${escapeHtml(message)}">`}
+      <div class="ship-actions">${nothing ? '' : '<button type="button" class="pill" data-git="commit" title="Commit on this Mac only">Commit</button>'}${d.branch && (!nothing || d.ahead || !d.upstream) ? `<button type="button" class="pill" data-git="push" title="${nothing ? 'Push this branch' : 'Commit, then push this branch'}">Push</button>` : ''}${d.branch ? `<label class="draft-pr" title="Open the pull request as a draft"><input type="checkbox" id="pr-draft"> Draft</label><button type="button" class="send-button" data-git="ship" title="${nothing ? 'Push and open a pull request' : 'Commit, push and open a pull request'}">${nothing ? 'Open PR ↗' : 'Ship PR ↗'}</button>` : ''}</div></form>`;
+  renderPr();
+}
+function diffHtml(file) {
+  const diff = state.changes.diffs.get(file);
+  if (!diff) return '<div class="diff-note">Loading the diff…</div>';
+  if (diff.error) return `<div class="diff-note">${escapeHtml(diff.error)}</div>`;
+  if (diff.binary) return '<div class="diff-note">Binary file: no text diff.</div>';
+  if (!diff.hunks.length) return '<div class="diff-note">No line changes (only the file mode or name changed).</div>';
+  return `<div class="diff">${diff.hunks.map(h => `<div class="hunk-head">${escapeHtml(h.context || h.header)}</div>${h.lines.map(l => `<div class="dl ${l.t === '+' ? 'add' : l.t === '-' ? 'del' : l.t === '\\' ? 'meta' : ''}" data-line="${l.n ?? l.o ?? ''}"><span class="ln">${l.t === '-' ? l.o : l.n ?? ''}</span><code>${escapeHtml(l.text) || ' '}</code></div>`).join('')}`).join('')}${diff.truncated ? '<div class="diff-note">The diff is too long to show in full here.</div>' : ''}</div>`;
+}
+async function loadDiff(file) {
+  const c = state.changes, id = c.id;
+  if (c.diffs.has(file)) return;
+  try { c.diffs.set(file, await api(`${changesBase()}/diff?path=${encodeURIComponent(file)}`)); }
+  catch (error) { c.diffs.set(file, { error:error.message }); }
+  if (state.changes.id !== id) return;
+  const row = [...$$('#drawer-changes .change-row')].find(r => r.dataset.path === file);
+  if (row) row.querySelector('.change-diff').innerHTML = diffHtml(file);
+}
+// Puts a message in the session's box (on the Conversation tab) ready to send, so nothing goes without a look.
+function draftFollowup(text) {
+  showPane('conversation');
+  const box = $('#followup-prompt');
+  box.value = box.value.trim() ? `${box.value.trim()}\n\n${text}` : text;
+  box.focus(); box.setSelectionRange(box.value.length, box.value.length);
+  box.dispatchEvent(new Event('input'));
+}
+$('#drawer-changes').addEventListener('click', async e => {
+  const c = state.changes;
+  const main = e.target.closest('.change-main');
+  if (main) {
+    const row = main.closest('.change-row'), file = row.dataset.path, diff = row.querySelector('.change-diff');
+    if (c.open.has(file)) { c.open.delete(file); row.classList.remove('open'); diff.classList.add('hidden'); return; }
+    c.open.add(file); row.classList.add('open'); diff.innerHTML = diffHtml(file); diff.classList.remove('hidden'); loadDiff(file); return;
+  }
+  const line = e.target.closest('.dl[data-line]');
+  if (line && line.dataset.line) {
+    const file = line.closest('.change-row').dataset.path;
+    return draftFollowup(`In \`${file}\` line ${line.dataset.line}:\n> ${line.querySelector('code').textContent.trim()}\n\n`);
+  }
+  if (e.target.closest('#send-back')) return draftFollowup('About your changes: ');
+  if (e.target.closest('#fix-checks')) {
+    const button = e.target.closest('#fix-checks'); button.disabled = true; button.textContent = 'Reading the failed logs…';
+    try { const { prompt } = await api(`${changesBase()}/check-logs`, { timeout:60000 }); draftFollowup(prompt); }
+    catch (error) { showFeedback(error.message); button.disabled = false; button.textContent = 'Fix failing checks'; }
+    return;
+  }
+  const action = e.target.closest('[data-git]')?.dataset.git;
+  if (!action) return;
+  const message = $('#commit-message')?.value.trim() || '';
+  const nothing = !c.data.files.length;
+  if (!nothing && action !== 'push' && !message) { $('#commit-message').focus(); return showFeedback('Write a commit message first.'); }
+  // "Commit & push" on a clean tree is a plain push; with changes it commits first.
+  const steps = action === 'push' && !nothing ? 'ship-no-pr' : action;
+  $$('#ship-box button').forEach(b => { b.disabled = true; });
+  showFeedback({ commit:'Committing…', push:'Pushing…', 'ship-no-pr':'Committing and pushing…', ship:'Committing, pushing and opening the pull request…' }[steps]);
+  try {
+    let result;
+    if (steps === 'ship-no-pr') { await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'commit', message }), timeout:120000 }); result = await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'push' }), timeout:120000 }); }
+    else result = await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action, message, draft:$('#pr-draft')?.checked }), timeout:120000 });
+    c.data = result.changes; c.v = ''; c.diffs.clear(); c.open.clear(); renderChanges();
+    if (result.pr?.url) { showFeedback(result.pr.existing ? 'Pushed. The pull request is updated.' : 'Pull request opened.'); loadPr(true); }
+    else showFeedback(result.push ? `Pushed ${result.push.branch}.` : `Committed ${result.commit?.sha || ''}.`);
+  } catch (error) { showFeedback(error.message); $$('#ship-box button').forEach(b => { b.disabled = false; }); }
+});
+$('#drawer-changes').addEventListener('submit', e => e.preventDefault());
+setInterval(() => { if (state.pane === 'changes' && !document.hidden && !$('#detail-drawer').classList.contains('hidden') && !$('#ship-box button:disabled')) loadChanges(true); }, 3000);
+async function loadBranchSetting() { try { $('#own-branch').checked = (await api('/api/branches')).ownBranch; } catch { /* Settings still work without it. */ } }
+$('#own-branch').addEventListener('change', () => api('/api/branches', { method:'POST', body:JSON.stringify({ ownBranch:$('#own-branch').checked }) }).catch(error => showFeedback(error.message)));
 // The terminal pane shows either a session's terminal or a harness sign-in window.
 function terminalTarget() {
   if (state.login) return { key:`login:${state.login.harness}`, tty:state.login.tty, url:`/api/harnesses/${state.login.harness}/terminal` };
@@ -771,7 +949,8 @@ async function openSession(id, silent = false) {
     $('#drawer-tabs').classList.toggle('hidden', !session.tty && !session.cwd);
     $('#drawer-tabs [data-pane=terminal]').classList.toggle('hidden', !session.tty);
     $('#drawer-tabs [data-pane=files]').classList.toggle('hidden', !session.cwd);
-    if (!silent) { state.files = { key:'', list:[] }; showPane('conversation'); fetchFiles(`/api/sessions/${encodeURIComponent(session.id)}`).then(() => openSession(session.id, true)); }
+    $('#drawer-tabs [data-pane=changes]').classList.toggle('hidden', !session.cwd);
+    if (!silent) { state.files = { key:'', list:[] }; state.changes = { id:session.id, v:'', data:null, open:new Set(), diffs:new Map() }; $('#changes-count').classList.add('hidden'); showPane('conversation'); if (session.cwd) loadChanges(true); fetchFiles(`/api/sessions/${encodeURIComponent(session.id)}`).then(() => openSession(session.id, true)); }
     else if (!session.tty && state.pane === 'terminal') showPane('conversation');
     $('#followup-skip-wrap').classList.toggle('hidden', Boolean(session.tty));
     $('.drawer-composer').classList.remove('hidden');
@@ -804,7 +983,7 @@ function renderTask(task, silent = false) { const id = task.id; $('#end-session'
 $('#auth-form').addEventListener('submit', async e => { e.preventDefault(); try { const result = await api('/api/auth', { method:'POST', body:JSON.stringify({ password:$('#auth-password').value, pairCode }) }); $('#auth-error').textContent = ''; $('#auth-password').value = ''; if (result.status === 'pending') return showWaiting(result.device?.name); await init(); } catch (error) { $('#auth-error').textContent = error.message; } });
 $('#show-password-setup').addEventListener('click', () => { $('#password-setup').classList.toggle('hidden'); $('#setup-password').focus(); });
 $('#password-setup').addEventListener('submit', async e => { e.preventDefault(); const password = $('#setup-password').value; if (password !== $('#setup-password-confirm').value) { $('#auth-error').textContent = 'Passwords do not match.'; return; } try { await api('/api/password/setup', { method:'POST', body:JSON.stringify({ password }) }); $('#auth-error').textContent = 'Password saved. Unlocking…'; await api('/api/auth', { method:'POST', body:JSON.stringify({ password }) }); $('#password-setup').reset(); await init(); } catch (error) { $('#auth-error').textContent = error.message; } });
-$('#logout-button').addEventListener('click', async () => { await api('/api/logout', { method:'POST' }); closeDrawer(); showAuth(); });
+$('#logout-button').addEventListener('click', async () => { forgetBoot(); await api('/api/logout', { method:'POST' }); closeDrawer(); showAuth(); });
 $$('.nav-item').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
 $('#view-live').addEventListener('click', () => { state.filter = 'live'; $$('#session-filters .pill').forEach(p => p.classList.toggle('active', p.dataset.filter === 'live')); setView('sessions'); });
 $('#view-sessions').addEventListener('click', () => setView('sessions'));
@@ -873,7 +1052,7 @@ async function previewFollowup() {
   }
 }
 $$('#drawer-tabs button').forEach(button => button.addEventListener('click', () => showPane(button.dataset.pane)));
-setInterval(() => loadTerminal(), 2000);
+setInterval(() => loadTerminal(), 1000);
 // Typing on the terminal's own prompt line sends a tracked follow-up into that same terminal (Shift+Enter for a new line).
 // The agent's question as buttons with its own wording. A tap sends the option and its text; the Mac checks the
 // question is still the same, moves the pointer there with arrow keys and presses Return.
@@ -1001,12 +1180,13 @@ function syncPhoneModel() {
   setOptions(picker, '<option value="">✦ Model</option>' + (harness === 'auto' ? '' : modelOptions(harness)));
   picker.value = [...picker.options].some(o => o.value === current) ? current : '';
   picker.classList.toggle('hidden', picker.options.length < 2);
+  $('#phone-perms').classList.toggle('hidden', !['auto', 'claude', 'codex'].includes(harness));
 }
 $('#phone-harness').addEventListener('change', syncPhoneModel);
 async function sendPhoneMessage() {
   const box = $('#phone-message-input'), text = box.value;
   if (!text.trim() && !attached.phone.length) return;
-  $('#harness-select').value = $('#phone-harness').value; renderModelChoices(); $('#model-select').value = $('#phone-model').value;
+  $('#harness-select').value = $('#phone-harness').value; renderModelChoices(); $('#model-select').value = $('#phone-model').value; $('#skip-permissions').checked = $('#phone-perms').value === 'skip';
   const project = $('#phone-project').value, workspace = $('#phone-workspace').value.trim();
   if (project === '__new__' && !workspace) { $('#phone-workspace').focus(); return showFeedback('Name the new workspace first.'); }
   $('#project-select').value = project; $('#new-workspace').value = project === '__new__' ? workspace : ''; toggleNewWorkspace();

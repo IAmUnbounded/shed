@@ -17,6 +17,14 @@ export function rankSessions(prompt, sessions, harness = 'auto') {
     return { session, score, reason: titleHits.length ? `Matches ${titleHits.slice(0, 3).join(', ')} in the session topic` : recentHits.length ? `Matches ${recentHits.slice(0, 3).join(', ')} in the recent conversation` : pathHits.length ? `Matches ${pathHits.slice(0, 3).join(', ')} in the project` : 'Recent session' };
   }).sort((a, b) => b.score - a.score);
 }
+// Harnesses switched off here are never picked when Laya chooses (new sessions and matched sessions alike).
+// Choosing one by hand, or following up in one of its sessions, still works.
+export function autoRoutePrefs(saved = {}, known = []) {
+  return { off:[...new Set((Array.isArray(saved.off) ? saved.off : []).filter(name => known.includes(name)))] };
+}
+export function routableHarnesses(healthy, prefs = {}) {
+  return healthy.filter(name => !(prefs.off || []).includes(name));
+}
 export function chooseRoute(prompt, sessions, harness = 'auto', sessionId = null) {
   if (sessionId) {
     const session = sessions.find(s => s.id === sessionId);

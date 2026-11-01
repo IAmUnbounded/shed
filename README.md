@@ -106,6 +106,14 @@ Notifications use Web Push through `public/sw.js`, signed with keys Shed creates
 
 Each session's **Files** tab lists the newest videos, images, audio, PDFs and documents in its project folder, with an inline preview and a Download button. Replies that mention one of those files get download buttons underneath. Files are only served from inside the session's project folder (symlinks included), never from hidden folders or `node_modules`, and only to a signed-in browser.
 
+## Review and ship changes
+
+Each session's **Changes** tab shows what its agent changed in the project, as git sees it: the branch, how far it is ahead of or behind its remote, and every changed file with its added and removed lines. Tap a file for its diff (it wraps to fit a phone screen). Tap a line to send the agent a note about it, or use **Send back with a note**.
+
+From the same tab, **Commit**, **Push** (it commits first if there is anything to commit), or **Ship PR**: commit, push and open a pull request in one tap. Pull requests go through the GitHub CLI (`gh`) with your own login. The description defaults to the agent's last reply, which is usually its own summary of the work. Once a pull request exists, the tab shows its checks; **Fix failing checks** puts the failed logs in a message to the agent, for you to send.
+
+**A branch per session.** A new session started in a git project works on a branch of its own (`shed/<topic>`), in its own checkout under `~/Shed Workspaces/branches`, branched from the project's current commit. Agents working on the same repository at the same time never change each other's files. Turn it off under Settings → A branch per session. Uncommitted changes in the original checkout are not carried over.
+
 ## Harness support
 
 | Harness | Discover sessions | Start tasks | Resume sessions |
@@ -125,5 +133,20 @@ Task data and service logs remain under `.jev-data` for compatibility with the e
 ```bash
 npm test
 ```
+
+### Speed
+
+```bash
+npm run test:latency   # a fixture Mac with 300 sessions and a git project; fails if any endpoint goes over its budget
+npm run bench          # the running Shed on this Mac, the way a phone uses it (p50 / p95 per endpoint)
+```
+
+The latency test starts a real Shed process with 300 sessions and a git repository with 30 changed files and a remote, then measures every request a phone makes (opening the app, polling, a conversation, changes, a diff, commit, push, pull request) against a budget per request.
+
+What keeps it fast:
+- Terminal access goes through one long-lived JavaScript-for-Automation process (`server/terminal-worker.js`) instead of starting `osascript` for each read: about 17 ms a read instead of ~150 ms. Each request to Terminal is a single Apple event. `SHED_TERMINAL_WORKER=0` goes back to the old way.
+- The app's files are kept on the phone by the service worker and served with ETags, so the app opens straight from the phone. The lists last seen are drawn from the phone's cache before the Mac answers, and opening is a single request (`/api/bootstrap`).
+- Large JSON answers are compressed on the Mac (a home connection's upload speed limits the tunnel), and polled lists answer "same" when nothing changed.
+- Git commands for a session run in parallel; a diff reuses the file list it was picked from.
 
 The integration test uses an isolated home directory and a fake Codex CLI. Unit tests cover Laya choice validation, model routing, live-process matching, and model-roster validation without loading the production model.

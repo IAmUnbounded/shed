@@ -3,20 +3,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript } from './sessions.js';
-import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState, footerMode } from './live.js';
-import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent, closeTerminalTab, ttyOf } from './terminal.js';
+import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState, footerMode, activeOnScreen } from './live.js';
+import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent, closeTerminalTab, ttyOf, runInTab, canSkipPermissions } from './terminal.js';
 import { autoClosePrefs, idleSessions } from './idle.js';
 import { exchangeStore, exchangeSummary, refusal, depthFor, messagePrompt, introductionPrompt, describe } from './exchanges.js';
-import { rankSessions } from './router.js';
+import { rankSessions, autoRoutePrefs, routableHarnesses } from './router.js';
 import { decideRoute, decideFollowup, decideModel, probeLaya, getLaya, layaStatus } from './laya.js';
 import { harnesses, modelConfig, validateModelConfig } from './models.js';
 import { harnessHealth, refreshHarnessHealth } from './health.js';
 import { initPush, pushPublicKey, subscribe, unsubscribe, notify, isSubscribed, pushCount } from './notify.js';
 import { listArtifacts, resolveInside, sendFile } from './files.js';
+import { repoRoot, changes as gitChanges, fileDiff, commitAll, push as gitPush, pullRequest, createPullRequest, failedCheckLogs, sessionWorktree } from './git.js';
 import { proStore } from './pro.js';
 import { interruptCodexThread } from './codex-app.js';
 import { uploadStore, attachmentNote, UPLOAD_ID } from './uploads.js';
@@ -385,6 +387,8 @@ async function routeInput(input, preview = false) {
   if (Object.keys(cachedHealth || {}).length) refreshHarnessHealth().catch(() => {});
   const healthyHarnesses = Object.entries(health).filter(([, status]) => status.state === 'ready').map(([name]) => name);
   if (input.harness && input.harness !== 'auto' && !healthyHarnesses.includes(input.harness)) throw new Error(health[input.harness]?.detail || `${input.harness} is not ready.`);
+  const chosen = input.harness && input.harness !== 'auto';
+  const pickable = chosen ? healthyHarnesses : routableHarnesses(healthyHarnesses, autoRoutePrefs(settings.autoRoute, harnesses));
   const all = sessions();
   let requestedCwd = typeof input.cwd === 'string' && all.some(s => s.cwd === input.cwd) ? input.cwd : '';
   if (input.newWorkspace) {
@@ -396,15 +400,15 @@ async function routeInput(input, preview = false) {
   }
   // A new session with no project gets a folder of its own, named from the message, never Shed's own code folder.
   if (!requestedCwd && !input.sessionId && input.newSession) requestedCwd = autoWorkspace(input.prompt, preview);
-  const candidates = input.newSession ? [] : all.filter(s => s.liveState !== 'working' && (!requestedCwd || s.cwd === requestedCwd) && (s.harness !== 'gemini' || Boolean(s.cwd)) && (input.harness && input.harness !== 'auto' ? s.harness === input.harness : healthyHarnesses.includes(s.harness)));
-  const fallback = input.harness && input.harness !== 'auto' ? input.harness : healthyHarnesses[0];
-  if (!fallback && !input.sessionId) throw new Error('No coding harness is ready. Check the harness status in the sidebar.');
+  const candidates = input.newSession ? [] : all.filter(s => s.liveState !== 'working' && (!requestedCwd || s.cwd === requestedCwd) && (s.harness !== 'gemini' || Boolean(s.cwd)) && (chosen ? s.harness === input.harness : pickable.includes(s.harness)));
+  const fallback = chosen ? input.harness : pickable[0];
+  if (!fallback && !input.sessionId) throw new Error(healthyHarnesses.length ? 'Every ready harness is switched off for Laya. Pick one, or turn one back on in Settings.' : 'No coding harness is ready. Check the harness status in the sidebar.');
   // The task planner checks follow-up health and permits only explicit handoffs.
   if (input.sessionId && preview) {
     const selected = all.find(s => s.id === input.sessionId);
     if (selected && !healthyHarnesses.includes(selected.harness)) throw new Error(health[selected.harness]?.detail || `${selected.harness} is not ready.`);
   }
-  const route = await decideRoute(input.prompt, input.sessionId ? all : candidates, input.harness || 'auto', input.sessionId || null, { preview, availableHarnesses:healthyHarnesses });
+  const route = await decideRoute(input.prompt, input.sessionId ? all : candidates, input.harness || 'auto', input.sessionId || null, { preview, availableHarnesses:pickable });
   if (!route.session && route.source !== 'laya') route.harness = fallback;
   return { route, cwd: requestedCwd, healthyHarnesses, health };
 }
@@ -426,12 +430,26 @@ const SECURITY_HEADERS = {
 };
 // Polled data carries a short version tag. When the page already has that version, the reply is just {"same":true},
 // so a phone re-downloads and re-renders only what changed.
+const versionOf = body => crypto.createHash('sha1').update(body).digest('base64url').slice(0, 16);
 function sendVersioned(req, res, value) {
   const body = JSON.stringify(value);
-  const v = crypto.createHash('sha1').update(body).digest('base64url').slice(0, 16);
+  const v = versionOf(body);
   if (new URL(req.url, 'http://x').searchParams.get('v') === v) return send(res, 200, { same:true, v });
-  res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' });
-  res.end(`${body.slice(0, -1)},"v":"${v}"}`);
+  writeJson(res, 200, `${body.slice(0, -1)},"v":"${v}"}`);
+}
+// Large answers are compressed here, on the Mac: a home connection's upload speed, not the server, is what limits a
+// phone on the tunnel. Brotli at a low quality costs ~1 ms for the 160 KB session list and makes it ~10× smaller.
+function compressFor(req, text) {
+  const accepts = String(req?.headers['accept-encoding'] || '');
+  if (text.length < 2048) return null;
+  if (/\bbr\b/.test(accepts)) return { encoding:'br', data:zlib.brotliCompressSync(text, { params:{ [zlib.constants.BROTLI_PARAM_QUALITY]:4, [zlib.constants.BROTLI_PARAM_SIZE_HINT]:Buffer.byteLength(text) } }) };
+  if (/\bgzip\b/.test(accepts)) return { encoding:'gzip', data:zlib.gzipSync(text, { level:4 }) };
+  return null;
+}
+function writeJson(res, status, text, headers = {}) {
+  const packed = compressFor(res.req, text);
+  res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store', Vary:'Accept-Encoding', ...headers, ...(packed ? { 'Content-Encoding':packed.encoding } : {}) });
+  res.end(packed ? packed.data : text);
 }
 // Lists only need what a row shows; the full task (reply text and all) loads when one is opened.
 const taskSummary = t => ({ id:t.id, title:t.title, status:t.status, harness:t.harness, sessionId:t.sessionId, cwd:t.cwd, createdAt:t.createdAt, updatedAt:t.updatedAt, delivery:t.delivery, tty:t.tty, waitingOn:t.waitingOn, handoffFrom:t.handoffFrom, returnedTo:t.returnedTo, model:t.model, modelSource:t.modelSource, routeSource:t.routeSource, error:(t.error || '').slice(0, 300) });
@@ -441,9 +459,7 @@ function sendText(res, status, text) {
   res.end(text);
 }
 function send(res, status, value, headers = {}) {
-  const data = JSON.stringify(value);
-  res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
-  res.end(data);
+  writeJson(res, status, JSON.stringify(value), headers);
 }
 function cookies(req) {
   return Object.fromEntries((req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(decodeURIComponent)).filter(x => x.length === 2));
@@ -772,7 +788,7 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       const promptFile = path.join(promptDir, `${task.id}.txt`);
       fs.writeFileSync(promptFile, agentPrompt, { mode:0o600 });
       if (session) task.transcriptOffset = transcriptSize(session.file);
-      const argv = ['claude', ...(session ? ['--resume', session.nativeId] : []), ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-skip-permissions'] : [])];
+      const argv = ['claude', ...(session ? ['--resume', session.nativeId] : []), ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-skip-permissions'] : ['--allow-dangerously-skip-permissions'])];
       const tty = await openTerminalAsync(cwd, argv, promptFile);
       Object.assign(task, { tty, permissions:skipPermissions ? 'skip' : 'default', output:`Opened a new Terminal window on the Mac (${tty.replace('/dev/', '')}).${skipPermissions ? '' : ' Claude will ask there before using tools; answer from the Terminal view.'}` });
     }
@@ -871,13 +887,71 @@ function startTask(input, route, modelDecision, requestedCwd = '') {
   return task;
 }
 
+// Who is asking and what this Mac offers: the first thing the app reads.
+function meInfo(req) {
+  return { ok:true, local:isLocalRequest(req), lanEnabled, pendingDevices:isLocalRequest(req) ? devices().filter(d => d.status === 'pending' && Date.now() - Date.parse(d.createdAt) < 86400000).map(d => publicDevice(d)) : [], phoneConnectedAt:settings.phoneConnectedAt || null, available, laya:layaStatus(), hostname:os.hostname(), phoneUrl:lanEnabled ? `http://${lanAddress()}:${port}` : '', remoteUrl:remoteUrl() };
+}
+// Static files are kept in memory with an ETag and ready-compressed copies (rebuilt when a file changes on disk), so a
+// phone that already has the app gets a 304 with no body, and one that doesn't gets a small download.
+const staticCache = new Map();
+function staticEntry(file) {
+  let stat;
+  try { stat = fs.statSync(file); } catch { return null; }
+  if (!stat.isFile()) return null;
+  const hit = staticCache.get(file);
+  if (hit && hit.mtime === stat.mtimeMs && hit.size === stat.size) return hit;
+  let data = fs.readFileSync(file);
+  const text = /\.(html|css|js|svg|webmanifest|json)$/.test(file);
+  // The page says which version of Shed it is, so a copy cached on the phone knows when it is out of date.
+  if (file === path.join(publicDir, 'index.html')) data = Buffer.from(data.toString('utf8').replace('<head>', `<head><meta name="shed-version" content="${appVersion}">`));
+  const entry = { mtime:stat.mtimeMs, size:stat.size, data, etag:`"${crypto.createHash('sha1').update(data).digest('base64url').slice(0, 20)}"`,
+    br:text ? zlib.brotliCompressSync(data, { params:{ [zlib.constants.BROTLI_PARAM_QUALITY]:11 } }) : null, gzip:text ? zlib.gzipSync(data, { level:9 }) : null };
+  staticCache.set(file, entry);
+  return entry;
+}
 function serveStatic(req, res, pathname) {
   const name = pathname === '/' ? 'index.html' : pathname.slice(1);
   const file = path.resolve(publicDir, name);
-  if (!file.startsWith(publicDir + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return send(res, 404, { error: 'Not found' });
+  const entry = file.startsWith(publicDir + path.sep) ? staticEntry(file) : null;
+  if (!entry) return send(res, 404, { error: 'Not found' });
   const type = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' }[path.extname(file)] || 'application/octet-stream';
-  res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache' });
-  fs.createReadStream(file).pipe(res);
+  const headers = { ...SECURITY_HEADERS, 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache', ETag:entry.etag, Vary:'Accept-Encoding' };
+  if (req.headers['if-none-match'] === entry.etag) { res.writeHead(304, headers); return res.end(); }
+  const accepts = String(req.headers['accept-encoding'] || '');
+  const [encoding, data] = entry.br && /\bbr\b/.test(accepts) ? ['br', entry.br] : entry.gzip && /\bgzip\b/.test(accepts) ? ['gzip', entry.gzip] : ['', entry.data];
+  res.writeHead(200, { ...headers, ...(encoding ? { 'Content-Encoding':encoding } : {}), 'Content-Length':data.length });
+  res.end(req.method === 'HEAD' ? undefined : data);
+}
+
+// Commit, push and open a pull request, one step at a time or all three ("ship"). One git action per project at a time,
+// so a double tap can't commit twice. A pull request's description defaults to the agent's last reply, which is
+// usually its own summary of the work.
+const gitBusy = new Set();
+async function gitAction(session, input) {
+  const action = String(input.action || '');
+  if (!['commit', 'push', 'pr', 'ship'].includes(action)) throw new Error('Unknown git action.');
+  if (gitBusy.has(session.cwd)) throw new Error('Git is already busy with this project. Try again in a moment.');
+  gitBusy.add(session.cwd);
+  try {
+    const done = {};
+    if (action === 'commit' || action === 'ship') {
+      const state = await gitChanges(session.cwd);
+      if (state.files.length) done.commit = await commitAll(session.cwd, input.message);
+      else if (action === 'commit') throw new Error('There is nothing to commit.');
+    }
+    if (action === 'push' || action === 'ship') done.push = await gitPush(session.cwd);
+    if (action === 'pr' || action === 'ship') {
+      const existing = await pullRequest(session.cwd, { fresh:true });
+      if (existing?.url) done.pr = { url:existing.url, existing:true };
+      else {
+        if (action === 'pr') await gitPush(session.cwd);
+        const last = [...sessionMessages(session)].reverse().find(m => m.role === 'assistant')?.text || '';
+        const bodyText = String(input.body ?? '').trim() || `${last.slice(0, 6000)}\n\n---\nOpened from Shed.`;
+        done.pr = await createPullRequest(session.cwd, { title:input.title || input.message || done.commit?.subject || session.title, body:bodyText, draft:Boolean(input.draft) });
+      }
+    }
+    return { ok:true, ...done, changes:await gitChanges(session.cwd) };
+  } finally { gitBusy.delete(session.cwd); }
 }
 
 // Share keys: what the "Send to Shed" Shortcut carries. A key can only post shares, never read anything, and is
@@ -1054,7 +1128,15 @@ const server = http.createServer(async (req, res) => {
       const svg = await QRCode.toString(url, { type:'svg', margin:1, errorCorrectionLevel:'M', color:{ dark:'#1e1c19', light:'#fffdf8' } });
       return send(res, 200, { url, link:base, secure:Boolean(remoteUrl()), qr:svg, phoneConnectedAt:settings.phoneConnectedAt || null });
     }
-    if (pathname === '/api/me' && req.method === 'GET') return send(res, 200, { ok:true, local:isLocalRequest(req), lanEnabled, pendingDevices:isLocalRequest(req) ? devices().filter(d => d.status === 'pending' && Date.now() - Date.parse(d.createdAt) < 86400000).map(d => publicDevice(d)) : [], phoneConnectedAt:settings.phoneConnectedAt || null, available, laya:layaStatus(), hostname:os.hostname(), phoneUrl:lanEnabled ? `http://${lanAddress()}:${port}` : '', remoteUrl:remoteUrl() });
+    if (pathname === '/api/bootstrap' && req.method === 'GET') {
+      // Everything the app needs to open, in one round trip: who you are, sessions, tasks, harness health and models.
+      // The list versions match what /api/sessions and /api/tasks give, so the next poll answers "same".
+      refreshQueuedTasks(); syncExchanges();
+      const sessionList = JSON.stringify({ sessions:sessions().map(publicSession) }), taskList = JSON.stringify({ tasks:tasks.slice(0, 60).map(taskSummary), exchanges:exchanges.all().slice(0, 40).map(exchangeSummary) });
+      const cached = harnessHealth(), health = Object.keys(cached || {}).length ? cached : await refreshHarnessHealth();
+      return writeJson(res, 200, `{"me":${JSON.stringify(meInfo(req))},"sessions":${sessionList.slice(12, -1)},"sessionsV":"${versionOf(sessionList)}","tasks":${taskList.slice(9, taskList.indexOf(',"exchanges":'))},"exchanges":${taskList.slice(taskList.indexOf(',"exchanges":') + 13, -1)},"tasksV":"${versionOf(taskList)}","harnesses":${JSON.stringify(health)},"models":${JSON.stringify(Object.fromEntries(harnesses.map(harness => [harness, modelConfig(harness, settings.modelRouting)])))}}`);
+    }
+    if (pathname === '/api/me' && req.method === 'GET') return send(res, 200, meInfo(req));
     // Shed Pro (a permanent address). Turning it on or off changes the address phones use, so only the Mac can do it.
     if (pathname === '/api/pro' && req.method === 'GET') return send(res, 200, { ...pro.status(), canChange:isLocalRequest(req) });
     if ((pathname === '/api/pro/activate' || pathname === '/api/pro/deactivate') && req.method === 'POST') {
@@ -1127,6 +1209,14 @@ const server = http.createServer(async (req, res) => {
       autoCloseIdle().catch(error => console.error(`Auto-close failed: ${error.message}`));
       return send(res, 200, { prefs:settings.autoClose });
     }
+    if (pathname === '/api/branches' && req.method === 'GET') return send(res, 200, { ownBranch:settings.ownBranch !== false });
+    if (pathname === '/api/branches' && req.method === 'POST') { const input = await body(req); settings = { ...settings, ownBranch:input.ownBranch !== false }; saveSettings(); return send(res, 200, { ownBranch:settings.ownBranch }); }
+    if (pathname === '/api/autoroute' && req.method === 'GET') return send(res, 200, { prefs:autoRoutePrefs(settings.autoRoute, harnesses) });
+    if (pathname === '/api/autoroute' && req.method === 'POST') {
+      const input = await body(req);
+      settings = { ...settings, autoRoute:autoRoutePrefs({ off:input.off }, harnesses) }; saveSettings();
+      return send(res, 200, { prefs:settings.autoRoute });
+    }
     if (pathname === '/api/push/prefs' && req.method === 'POST') {
       const input = await body(req);
       settings = { ...settings, notify:{ finished:input.finished !== false, asking:input.asking !== false } }; saveSettings();
@@ -1144,6 +1234,23 @@ const server = http.createServer(async (req, res) => {
       const file = resolveInside(root, query.get('path'));
       if (!file) return send(res, 404, { error:'That file is not available.' });
       return sendFile(req, res, file, query.get('download') === '1');
+    }
+    // Git for developers: what a session changed, one file's diff, and commit / push / pull request from the phone.
+    const gitMatch = pathname.match(/^\/api\/sessions\/(.+)\/(changes|diff|git|pr|check-logs)$/);
+    if (gitMatch) {
+      const session = sessions().find(s => s.id === decodeURIComponent(gitMatch[1]));
+      const cwd = session?.cwd, kind = gitMatch[2], query = new URL(req.url, 'http://x').searchParams;
+      if (!cwd || cwd === '/' || !fs.existsSync(cwd)) return send(res, 404, { error:'This session has no project folder on the Mac.' });
+      if (kind === 'changes' && req.method === 'GET') return sendVersioned(req, res, await gitChanges(cwd));
+      if (kind === 'diff' && req.method === 'GET') return send(res, 200, await fileDiff(cwd, String(query.get('path') || '')));
+      if (kind === 'pr' && req.method === 'GET') return send(res, 200, { pr:await pullRequest(cwd, { fresh:query.get('fresh') === '1' }) });
+      if (kind === 'check-logs' && req.method === 'GET') {
+        const { pr, failed, logs } = await failedCheckLogs(cwd);
+        const prompt = `The checks on pull request #${pr.number} failed: ${failed.map(c => c.name).join(', ')}. Find the cause and fix it, then commit and push.\n\n${logs.map(log => `\`\`\`\n${log}\n\`\`\``).join('\n\n')}`;
+        return send(res, 200, { prompt, failed:failed.map(c => c.name) });
+      }
+      if (kind === 'git' && req.method === 'POST') return send(res, 200, await gitAction(session, await body(req)));
+      return send(res, 405, { error:'Not allowed.' });
     }
     const loginMatch = pathname.match(/^\/api\/harnesses\/([a-z]+)\/(login|terminal)$/);
     if (loginMatch && loginCommands[loginMatch[1]]) {
@@ -1212,13 +1319,14 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok:true });
       }
     }
-    // Changing an open Claude session's permission mode: Shift+Tab until its footer names the mode asked for. Only the
-    // modes Claude's own cycle offers; skipping permissions is never switched on from here.
+    // Changing an open Claude session's permission mode: Shift+Tab until its footer names the mode asked for.
+    // Skipping permissions is only in that cycle when Claude was started with --allow-dangerously-skip-permissions.
+    // Otherwise, asked with restart:true, Shed ends Claude and resumes the same conversation in the same tab with skip on.
     const permMatch = pathname.match(/^\/api\/sessions\/(.+)\/permissions$/);
     if (permMatch && req.method === 'POST') {
       const input = await body(req);
       const target = input.mode;
-      if (!['ask', 'edits', 'plan', 'auto'].includes(target)) return send(res, 400, { error:'That mode can\'t be chosen from Shed.' });
+      if (!['ask', 'edits', 'plan', 'auto', 'skip'].includes(target)) return send(res, 400, { error:'That mode can\'t be chosen from Shed.' });
       const session = sessions(true).find(s => s.id === decodeURIComponent(permMatch[1]));
       if (!session || session.harness !== 'claude' || !session.tty) return send(res, 409, { error:'Only Claude sessions open in a Terminal window can change mode here.' });
       if (!agentInForeground(session.tty, 'claude')) return send(res, 409, { error:'Claude is no longer running in that Terminal tab.' });
@@ -1230,10 +1338,29 @@ const server = http.createServer(async (req, res) => {
       // Shift+Tab steps through the modes Claude offers. If the one asked for never comes up, step on round to where it began.
       const press = async () => { await typeIntoTerminalAsync(session.tty, '\u001b[Z'); await new Promise(resolve => setTimeout(resolve, 800)); return footerMode(await readTerminalAsync(session.tty, 14) || ''); };
       let mode = start;
-      for (let presses = 0; mode !== target && presses < 5; presses++) mode = await press();
-      for (let presses = 0; mode !== target && mode !== start && presses < 5; presses++) mode = await press();
+      // Skip is only in the cycle when Claude's command line offers it; without that, stepping through can't reach it.
+      if (target === 'skip' && start !== 'skip' && input.restart !== true && !canSkipPermissions(claudeLiveSessions().get(session.nativeId)?.pid)) return send(res, 409, { error:'This session was started without the option to skip permissions.', mode:start, restart:true });
+      const restart = target === 'skip' && input.restart === true && start !== 'skip';
+      // A restart is asked for only after the cycle was already tried, so it isn't stepped through again.
+      if (!restart) {
+        for (let presses = 0; mode !== target && presses < 5; presses++) mode = await press();
+        for (let presses = 0; mode !== target && mode !== start && presses < 5; presses++) mode = await press();
+      }
+      if (restart) {
+        if (session.liveState === 'working' || activeOnScreen(screen)) return send(res, 409, { error:'Claude is in the middle of a reply. Wait for it to finish, or Stop it, then try again.' });
+        const result = await endAgent(endTarget(session) || {});
+        if (!result.stopped) return send(res, 409, { error:'Claude did not stop. Close its Terminal window on the Mac.' });
+        cancelSessionTasks(session.id, 'Restarted with permissions skipped.');
+        const model = /^[\w.:\[\]-]{1,80}$/.test(session.currentModel || '') ? ['--model', session.currentModel] : [];
+        await runInTab(session.tty, session.cwd || os.homedir(), ['claude', '--resume', session.nativeId, ...model, '--dangerously-skip-permissions']);
+        for (let waited = 0; mode !== 'skip' && waited < 12000; waited += 1000) { await new Promise(resolve => setTimeout(resolve, 1000)); mode = footerMode(await readTerminalAsync(session.tty, 14) || ''); }
+        sessions(true); broadcast('sessions', {});
+        if (mode === 'skip') return send(res, 200, { ok:true, mode, restarted:true });
+        return send(res, 409, { error:'Claude was restarted with permissions skipped, but Shed can\'t see it ready yet. Check the Terminal tab.', mode });
+      }
       sessions(true); broadcast('sessions', {});
       if (mode === target) return send(res, 200, { ok:true, mode });
+      if (target === 'skip') return send(res, 409, { error:'This session was started without the option to skip permissions.', mode, restart:true });
       return send(res, 409, { error:'Claude doesn\'t offer that mode in this session, so it was left as it was.', mode });
     }
     const endMatch = pathname.match(/^\/api\/sessions\/(.+)\/end$/);
@@ -1299,9 +1426,13 @@ const server = http.createServer(async (req, res) => {
       if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 20000) return send(res, 400, { error: 'Prompt must be between 1 and 20,000 characters.' });
       let { input:planned, route, cwd, model } = await planTask(input);
       input = planned;
+      // A new session in a git project works on a branch of its own, in its own checkout.
+      const ownBranch = !route.session && cwd && input.ownBranch !== false && settings.ownBranch !== false ? await sessionWorktree(cwd, input.prompt) : null;
+      if (ownBranch) cwd = ownBranch.path;
       if (route.session?.liveState === 'working' && !['codex', 'claude'].includes(route.session.harness)) return send(res, 409, { error: 'This desktop session is still working. Wait for it to finish before sending a follow-up.' });
       if (route.session && [...active.values()].some(child => child.layaSessionId === route.session.id)) return send(res, 409, { error: 'This session is already running a task.' });
       const task = startTask(input, route, model, cwd);
+      if (ownBranch) { Object.assign(task, { branch:ownBranch.branch, project:ownBranch.project }); saveTasks(); }
       if (route.session && active.has(task.id)) active.get(task.id).layaSessionId = route.session.id;
       return send(res, 201, { task });
     }
@@ -1339,6 +1470,13 @@ server.listen(port, host, () => {
   console.log(`Harnesses: ${Object.entries(available).map(([name, yes]) => `${name} ${yes ? 'ready' : 'view only'}`).join(' · ')}`);
   if (process.env.LAYA_PRELOAD !== '0') getLaya().then(() => console.log('\nLaya local decision model is ready.')).catch(error => console.error(`\nLaya preload failed: ${error.message}`));
   refreshHarnessHealth().catch(error => console.error(`Harness health check failed: ${error.message}`));
+  // Warm-up, so no phone request pays a first-time cost: the app's files compressed, the Terminal helper running,
+  // and the git root of every open session's folder known.
+  setImmediate(() => {
+    for (const name of fs.readdirSync(publicDir)) staticEntry(path.join(publicDir, name));
+    if (process.env.SHED_TERMINAL_WORKER !== '0' && process.platform === 'darwin') readTerminalAsync('/dev/ttys-warmup', 1).catch(() => {});
+    for (const session of sessions().filter(s => s.liveState !== 'history' && s.cwd)) repoRoot(session.cwd).catch(() => {});
+  });
   setInterval(() => refreshHarnessHealth().catch(error => console.error(`Harness health check failed: ${error.message}`)), 60000).unref();
   watchAndNotify();
   setInterval(() => { sessions(true); watchAndNotify(); }, 10000).unref();

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { terminalCall } from './terminal-worker.js';
 
 // Claude Code writes ~/.claude/sessions/<pid>.json for each running interactive session, with its session ID and busy/idle status.
 export function claudeLiveSessions() {
@@ -153,7 +154,17 @@ function osascriptAsync(script, args) {
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Terminal is reached through the long-lived helper in terminal-worker.js (~20 ms a read instead of ~150 ms).
+// SHED_TERMINAL_WORKER=0 goes back to one osascript per call. A read that fails in the helper is retried the old way;
+// typing and opening windows are not, since the helper may already have done them before it failed.
+const useWorker = process.env.SHED_TERMINAL_WORKER !== '0';
 export async function readTerminalAsync(tty, maxLines = 400) {
+  if (useWorker) {
+    try {
+      const text = await terminalCall('read', { tty });
+      return text === null ? null : String(text).replace(/\s+$/, '').split('\n').slice(-maxLines).join('\n');
+    } catch { /* Fall back to osascript below. */ }
+  }
   const text = await osascriptAsync(`${findTab}
 on run argv
   set t to findTab(item 1 of argv)
@@ -167,7 +178,7 @@ end run`, [tty]);
 export async function typeIntoTerminalAsync(tty, text, { prompt = false, agent = '' } = {}) {
   if (agent && !agentInForeground(tty, agent)) throw new Error(`${agent} is no longer running in that Terminal tab.`);
   const send = async value => {
-    const result = await osascriptAsync(`${findTab}
+    const result = useWorker ? await terminalCall('type', { tty, text:value }) : await osascriptAsync(`${findTab}
 on run argv
   set t to findTab(item 1 of argv)
   if t is missing value then return "missing"
@@ -185,7 +196,7 @@ end run`, [tty, value]);
 
 export async function openTerminalAsync(cwd, argv, promptFile) {
   const command = `cd ${shellQuote(cwd)} && ${argv.map(shellQuote).join(' ')}${promptFile ? ` "$(cat ${shellQuote(promptFile)}; rm -f ${shellQuote(promptFile)})"` : ''}`;
-  const tty = await osascriptAsync(`on run argv
+  const tty = useWorker ? await terminalCall('open', { command }) : await osascriptAsync(`on run argv
   tell application "Terminal"
     set t to do script (item 1 of argv)
     return tty of t
@@ -246,6 +257,21 @@ export async function closeTerminalTab(tty) {
 end run`, [tty]);
   // "closed" also covers a profile that closes the tab by itself once its shell exits.
   return { closed:result === 'closed', reason:result === 'closed' ? '' : 'other-tabs' };
+}
+// Whether a running Claude was started with skipping permissions on, or offered in its Shift+Tab cycle.
+export function canSkipPermissions(pid) {
+  if (!pid) return false;
+  const args = spawnSync('/bin/ps', ['-o', 'args=', '-p', String(pid)], { encoding:'utf8', timeout:2000 }).stdout || '';
+  return /(^|\s)--(allow-)?dangerously-skip-permissions(\s|$)/.test(args);
+}
+// Starts a command in a tab whose agent has just ended (to restart it with other flags). Typed only while nothing but
+// the shell is left on the tab, so it never lands in a running program.
+export async function runInTab(tty, cwd, argv) {
+  for (let waited = 0; !onlyShellsOnTty(tty); waited += 250) {
+    if (waited >= 3000) throw new Error('Something is still running in that Terminal tab.');
+    await pause(250);
+  }
+  await typeIntoTerminalAsync(tty, `cd ${shellQuote(cwd)} && ${argv.map(shellQuote).join(' ')}`);
 }
 export async function stopAgent(pid, command, { graceMs = 5000 } = {}) {
   const names = Array.isArray(command) ? command : [command];
