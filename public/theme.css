@@ -392,7 +392,14 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 @keyframes px-steam { 0% { opacity: 0; transform: translateY(0); } 33% { opacity: 1; transform: translateY(-1px); } 66% { opacity: .5; transform: translateY(-2px); } }
 @keyframes px-wave { 0% { transform: rotate(0); } 50% { transform: rotate(8deg); } }
 @media (max-width: 700px) { .agent-desk { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .agent-stage { height: 84px; } .critter { width: 96px; height: 72px; } }
-@media (prefers-reduced-motion: reduce) { .critter *, .agent-status i { animation: none !important; } }
+/* Two sessions working together: smaller critters, a note passing between them. */
+.pair { position: relative; display: flex; align-items: center; gap: 10px; }
+.agent.paired .critter { width: 64px; height: 54px; }
+.pair-helper { border-radius: 8px; }
+.pair-helper:hover { background: #3a2a1c0d; }
+.handoff { position: absolute; left: 50%; top: 22px; width: 6px; height: 5px; margin-left: -3px; background: #fffdf8; box-shadow: inset 0 -1px #d8ccb6, 0 0 0 1px #8a6a4f; animation: px-handoff 2.4s steps(12) infinite; }
+@keyframes px-handoff { 0% { transform: translate(-26px, 0); } 25% { transform: translate(0, -6px); } 50% { transform: translate(26px, 0); } 75% { transform: translate(0, -6px); } 100% { transform: translate(-26px, 0); } }
+@media (prefers-reduced-motion: reduce) { .critter *, .agent-status i, .handoff { animation: none !important; } }
 .agent-stage { position: relative; height: 104px; }
 .agent-harness { position: absolute; top: 8px; left: 10px; font: 500 10px var(--mono); color: var(--quiet); letter-spacing: .02em; }
 .agent-status { white-space: nowrap; }
