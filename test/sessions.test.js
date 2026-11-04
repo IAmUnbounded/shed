@@ -3,10 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { sessionMessages } from '../server/sessions.js';
+import { sessionMessages, linkSpawned } from '../server/sessions.js';
 
-test('a codex exec run is linked to the open Claude session whose transcript handed it the prompt', async () => {
-  const { linkSpawned } = await import('../server/sessions.js');
+test('a codex exec run is linked to the open Claude session whose transcript handed it the prompt', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'laya-spawn-'));
   const parentFile = path.join(dir, 'parent.jsonl'), otherFile = path.join(dir, 'other.jsonl');
   fs.writeFileSync(parentFile, JSON.stringify({ type:'assistant', message:{ content:[{ type:'tool_use', name:'Bash', input:{ command:"cat > p.md <<'EOF'\nRead-only review. Do not \"modify\" files.\nMore detail\nEOF\ncodex exec - < p.md" } }] } }) + '\n');

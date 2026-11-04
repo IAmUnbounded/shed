@@ -392,7 +392,6 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 @keyframes px-steam { 0% { opacity: 0; transform: translateY(0); } 33% { opacity: 1; transform: translateY(-1px); } 66% { opacity: .5; transform: translateY(-2px); } }
 @keyframes px-wave { 0% { transform: rotate(0); } 50% { transform: rotate(8deg); } }
 @media (max-width: 700px) { .agent-desk { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .agent-stage { height: 84px; } .critter { width: 96px; height: 72px; } }
-/* Two sessions working together: smaller critters, a note passing between them. */
 .pair { position: relative; display: flex; align-items: center; gap: 10px; }
 .agent.paired .critter { width: 64px; height: 54px; }
 .pair-helper { border-radius: 8px; }

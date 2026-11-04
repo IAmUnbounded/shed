@@ -105,8 +105,8 @@ function codexRecord(file) {
   const id = path.basename(file).match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/)?.[1] || meta.id || meta.session_id;
   if (!id) return null;
   // A run another program started (`codex exec`); its first prompt line is how linkSpawned finds that program's session.
-  const needle = meta.source === 'exec' ? String(prompts.find(x => !x.includes('AGENTS.md')) || '').replace(/<([\w-]+)>[\s\S]*?<\/\1>/g, '').trim().split('\n')[0].slice(0, 80) : '';
-  return { id: `codex:${id}`, nativeId: id, harness: 'codex', title: title || 'Untitled Codex session', lastPrompt: clean(recent.at(-1), 260), cwd: meta.cwd || '', currentModel: lastModel(tail), permissions: codexPermissions(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop', ...(needle.length >= 20 && { needle }) };
+  const needle = meta.source === 'exec' ? (prompts.find(x => !x.includes('AGENTS.md')) || '').replace(/<([\w-]+)>[\s\S]*?<\/\1>/g, '').trim().split('\n')[0].slice(0, 400) : '';
+  return { id: `codex:${id}`, nativeId: id, harness: 'codex', title: title || 'Untitled Codex session', lastPrompt: clean(recent.at(-1), 260), cwd: meta.cwd || '', currentModel: lastModel(tail), permissions: codexPermissions(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop', ...(needle.length >= 12 && { needle }) };
 }
 
 function claudeRecord(file) {
@@ -195,8 +195,7 @@ export function discoverSessions() {
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
 }
 
-// A Claude session that ran `codex exec` (a Codex review, say) has the prompt it handed over in its own transcript,
-// JSON-escaped. The open Claude session in the same folder that holds it is the Codex run's parent.
+// The Claude session that ran `codex exec` holds the prompt it handed over, JSON-escaped, in its own transcript.
 const holds = new Map();
 function transcriptHolds(file, needle) {
   const stat = fs.statSync(file), key = `${file}:${stat.mtimeMs}:${needle}`;
@@ -205,7 +204,7 @@ function transcriptHolds(file, needle) {
   return holds.get(key);
 }
 export function linkSpawned(list) {
-  const open = list.filter(s => s.harness === 'claude' && s.liveState !== 'history' && s.file);
+  const open = list.filter(s => s.harness === 'claude' && s.liveState !== 'history');
   for (const s of list) {
     if (!s.needle || s.liveState === 'history') continue;
     // Same folder first; then the same folder name, since a Claude session keeps the path it started in after a move.
