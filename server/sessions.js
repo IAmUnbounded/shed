@@ -104,7 +104,9 @@ function codexRecord(file) {
   const recent = jsonLines(tail).filter(x => x.type === 'response_item' && x.payload?.type === 'message' && x.payload.role === 'user').map(x => contentText(x.payload.content)).filter(isUsefulPrompt);
   const id = path.basename(file).match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/)?.[1] || meta.id || meta.session_id;
   if (!id) return null;
-  return { id: `codex:${id}`, nativeId: id, harness: 'codex', title: title || 'Untitled Codex session', lastPrompt: clean(recent.at(-1), 260), cwd: meta.cwd || '', currentModel: lastModel(tail), permissions: codexPermissions(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop' };
+  // A run another program started (`codex exec`); its first prompt line is how linkSpawned finds that program's session.
+  const needle = meta.source === 'exec' ? (prompts.find(x => !x.includes('AGENTS.md')) || '').replace(/<([\w-]+)>[\s\S]*?<\/\1>/g, '').trim().split('\n')[0].slice(0, 400) : '';
+  return { id: `codex:${id}`, nativeId: id, harness: 'codex', title: title || 'Untitled Codex session', lastPrompt: clean(recent.at(-1), 260), cwd: meta.cwd || '', currentModel: lastModel(tail), permissions: codexPermissions(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop', ...(needle.length >= 12 && { needle }) };
 }
 
 function claudeRecord(file) {
@@ -188,9 +190,29 @@ export function discoverSessions() {
   }
   try { sessions.push(...opencodeCached()); } catch {}
   const live = liveSessionStates(sessions);
-  return sessions.filter(session => !(session.title.startsWith('Untitled ') && !session.cwd))
+  return linkSpawned(sessions.filter(session => !(session.title.startsWith('Untitled ') && !session.cwd))
     .map(session => ({ ...session, liveState:live.get(session.id)?.liveState || 'history', tty:live.get(session.id)?.tty || '', permissions:live.get(session.id)?.permissions || session.permissions || '' }))
-    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+}
+
+// The Claude session that ran `codex exec` holds the prompt it handed over, JSON-escaped, in its own transcript.
+const holds = new Map();
+function transcriptHolds(file, needle) {
+  const stat = fs.statSync(file), key = `${file}:${stat.mtimeMs}:${needle}`;
+  if (holds.size > 500) holds.clear();
+  if (!holds.has(key)) holds.set(key, sliceFile(file, 8 * 1024 * 1024, true).includes(JSON.stringify(needle).slice(1, -1)));
+  return holds.get(key);
+}
+export function linkSpawned(list) {
+  const open = list.filter(s => s.harness === 'claude' && s.liveState !== 'history');
+  for (const s of list) {
+    if (!s.needle || s.liveState === 'history') continue;
+    // Same folder first; then the same folder name, since a Claude session keeps the path it started in after a move.
+    const held = c => { try { return transcriptHolds(c.file, s.needle); } catch { return false; } };
+    const parent = open.find(c => c.cwd === s.cwd && held(c)) || open.find(c => path.basename(c.cwd) === path.basename(s.cwd) && held(c));
+    if (parent) s.spawnedBy = parent.id;
+  }
+  return list;
 }
 
 export function sessionMessages(session) {
@@ -255,7 +277,7 @@ export function codexQueuedProgress(task) {
 }
 
 export function publicSession(session) {
-  const { file, nativeId, ...safe } = session;
+  const { file, nativeId, needle, ...safe } = session;
   return safe;
 }
 

@@ -362,12 +362,17 @@ function openTalk() {
   $('#talk-target').innerHTML = others.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(`${sessionName(s.id)} — ${s.title.slice(0, 60)}`)}</option>`).join('');
   $('#talk-dialog').showModal();
 }
-function agentCard(session, index) {
+// `helper`: a session this one started (a Codex review it ran), drawn on the same card.
+function agentCard(session, index, helper) {
   const [mood, status] = agentMoods[session.liveState] || agentMoods.open;
-  return `<button class="agent ${mood}" data-session="${escapeHtml(session.id)}" style="--d:${(index * 0.83) % 4}s" aria-label="${escapeHtml(`${harnessNames[session.harness] || session.harness} in ${projectName(session.cwd) || 'a project'}: ${status}. ${session.title}`)}">
-    <span class="agent-stage"><span class="agent-harness">${escapeHtml(harnessNames[session.harness] || session.harness)}</span>${agentSvg(session.harness, mood)}</span>
+  const name = harnessNames[session.harness] || session.harness, helperName = helper && (harnessNames[helper.harness] || helper.harness);
+  const helperMood = helper && (agentMoods[helper.liveState] || agentMoods.open)[0];
+  const stage = helper ? `<span class="agent-harness">${escapeHtml(`${name} ↔ ${helperName}`)}</span><span class="pair">${agentSvg(session.harness, mood)}<span class="handoff" aria-hidden="true"></span><span class="pair-helper" data-session="${escapeHtml(helper.id)}" title="${escapeHtml(`Open the ${helperName} session: ${helper.title}`)}">${agentSvg(helper.harness, helperMood)}</span></span>`
+    : `<span class="agent-harness">${escapeHtml(name)}</span>${agentSvg(session.harness, mood)}`;
+  return `<button class="agent ${mood}${helper ? ' paired' : ''}" data-session="${escapeHtml(session.id)}" style="--d:${(index * 0.83) % 4}s" aria-label="${escapeHtml(`${name} in ${projectName(session.cwd) || 'a project'}: ${status}.${helper ? ` Working with ${helperName}.` : ''} ${session.title}`)}">
+    <span class="agent-stage">${stage}</span>
     <span class="agent-name">${escapeHtml(projectName(session.cwd) || 'Untitled project')}</span>
-    <span class="agent-status"><i></i>${status}</span>${talkBadge(session)}
+    <span class="agent-status"><i></i>${status}</span>${helper ? `<span class="agent-talk" title="${escapeHtml(helper.title)}">↔ with ${escapeHtml(helperName)} · ${escapeHtml((agentMoods[helper.liveState] || agentMoods.open)[1].toLowerCase())}</span>` : ''}${talkBadge(session)}
     <span class="agent-title">${escapeHtml(session.title)}</span>
   </button>`;
 }
@@ -376,7 +381,10 @@ function render() {
   const urgency = s => ({ asking:0, working:1 })[s.liveState] ?? 2;
   const live = state.sessions.filter(s => s.liveState !== 'history').sort((a,b) => urgency(a) - urgency(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   $('#active-count').textContent = live.length;
-  const desk = live.length ? live.map(agentCard).join('') : `<div class="agent-empty">${agentSvg('pi', 'open')}<div><strong>No agents at their desks</strong><p>Start a session from the sidebar's + and it will show up here.</p></div></div>`;
+  const helpers = new Map(); // one helper per card; any further run a session started keeps its own card
+  for (const s of live) if (live.some(p => p.id === s.spawnedBy) && !helpers.has(s.spawnedBy)) helpers.set(s.spawnedBy, s);
+  const paired = new Set(helpers.values());
+  const desk = live.length ? live.filter(s => !paired.has(s)).map((s, i) => agentCard(s, i, helpers.get(s.id))).join('') : `<div class="agent-empty">${agentSvg('pi', 'open')}<div><strong>No agents at their desks</strong><p>Start a session from the sidebar's + and it will show up here.</p></div></div>`;
   const deskPrint = fingerprint(desk);
   if ($('#active-sessions').dataset.print !== deskPrint) { $('#active-sessions').innerHTML = desk; $('#active-sessions').dataset.print = deskPrint; } // rebuilding every refresh would restart the animations
   renderTalk();
