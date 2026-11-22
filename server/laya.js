@@ -43,6 +43,7 @@ const harnessDescriptions = {
   gemini:'Gemini CLI: coding, research, and multimodal workflows.',
   pi:'Pi: configurable coding agent with provider selection.',
   opencode:'OpenCode: coding agent with configurable providers and models.',
+  antigravity:'Antigravity: Google agentic coding, planning, browser automation, and multi-step workspace tasks.',
 };
 
 export async function decideRoute(prompt, sessions, harness = 'auto', sessionId = null, options = {}) {
@@ -93,9 +94,10 @@ export function sessionModel(id, models) {
   if (!id) return null;
   const value = id.toLowerCase();
   const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // An ID ending in a digit (claude-opus-5) is not found inside a longer version (claude-opus-5-5).
   // Aliases like "opus" match full IDs like "claude-opus-5-5"; the longest alias wins so "flash-lite" beats "flash".
   return [...models].sort((a, b) => b.id.length - a.id.length)
-    .find(model => new RegExp(`(^|[^a-z0-9])${escape(model.id.toLowerCase())}($|[^a-z0-9])`).test(value)) || null;
+    .find(model => new RegExp(`(^|[^a-z0-9])${escape(model.id.toLowerCase())}(?![a-z0-9])${/\d$/.test(model.id) ? '(?!-\\d)' : ''}`).test(value)) || null;
 }
 
 export async function decideModel(prompt, harness, config, options = {}) {

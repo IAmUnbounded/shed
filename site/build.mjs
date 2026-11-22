@@ -12,7 +12,7 @@ const site = process.env.SITE_URL || (process.env.VERCEL_PROJECT_PRODUCTION_URL 
 
 const headEnd = page.indexOf('</style>') + '</style>'.length;
 const head = page.slice(0, headEnd), body = page.slice(headEnd);
-const description = 'Shed connects your phone to the Claude Code, Codex, Gemini, OpenCode and Pi sessions on your Mac. Send a message from anywhere; it runs in a real Terminal window you can watch and approve. Powered by Laya.';
+const description = 'Shed connects your phone to the Claude Code, Codex, Gemini, OpenCode, Pi and Antigravity sessions on your Mac. Send a message from anywhere; it runs in a real Terminal window you can watch and approve. Powered by Laya.';
 
 const html = `<!doctype html>
 <html lang="en">

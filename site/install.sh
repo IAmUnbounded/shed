@@ -53,7 +53,7 @@ NODE="$(command -v node)"
 CLOUDFLARED="$(command -v cloudflared)"
 
 found=""
-for agent in claude codex gemini opencode pi; do command -v "$agent" >/dev/null 2>&1 && found="$found $agent"; done
+for agent in claude codex gemini opencode pi agy; do command -v "$agent" >/dev/null 2>&1 && found="$found $agent"; done
 [ -n "$found" ] && say "Found agents:$found" || say "No coding agents found yet. Install Claude Code or Codex and Shed picks them up."
 
 # The code: a shallow clone, updated in place on later runs (your settings live in the ignored .jev-data folder).

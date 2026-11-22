@@ -77,7 +77,7 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 .nav-count { color: #65665d; background: #dfdcd4; border-radius: 4px; }
 .harness-heading { margin-top: 40px; }
 .harness-list { padding: 0 5px; gap: 2px; }
-.harness-row { color: #55584f; font-size: 12px; padding: 8px 9px; }
+.harness-row { color: #55584f; font-size: 12px; padding: 8px 7px; gap: 8px; }
 .harness-row small { font: 500 9px var(--mono); }
 .harness-symbol { border-radius: 6px; }
 .harness-symbol.codex { background: #dde8de; color: #446d57; }
@@ -85,6 +85,7 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 .harness-symbol.gemini { background: #e4e6ef; color: #666d96; }
 .harness-symbol.pi { background: #e8e3d8; color: #7a704e; }
 .harness-symbol.opencode { background: #dfe8e8; color: #497678; }
+.harness-symbol.antigravity { background: #dce9f5; color: #2b649a; }
 .harness-row .health-ready { color: var(--green); }
 .harness-row .health-needs_auth, .harness-row .health-offline { color: var(--accent); }
 .harness-row .health-checking, .harness-row .health-unknown { color: var(--quiet); }
@@ -94,6 +95,9 @@ img.brand-mark { background: none; image-rendering: pixelated; }
   font: 400 10px/1.5 var(--sans);
 }
 .harness-health-details b { color: var(--ink); }
+/* A long health message (file paths have no spaces) must wrap inside the sidebar, never widen it. */
+.harness-list { grid-template-columns: minmax(0, 1fr); }
+.harness-health-details div { overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
 .router-status { color: var(--green); }
 .router-status button { color: var(--muted); }
 .sidebar-bottom { border-color: var(--line); }
@@ -621,20 +625,41 @@ img.brand-mark { background: none; image-rendering: pixelated; }
 .update-banner { position: fixed; top: calc(12px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 70; display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; border-radius: 999px; background: var(--ink); color: #fff; font: 500 14px var(--sans); box-shadow: 0 8px 24px #0003; }
 .update-banner button { border: 0; border-radius: 999px; background: var(--accent); color: #fff; font: 600 14px var(--sans); padding: 8px 14px; }
 
-/* Shed Pro card in Settings */
-#pro-settings h3 { display:flex; align-items:center; gap:10px; }
-.pro-form { display:grid; gap:10px; margin:14px 0 6px; max-width:520px; }
-.pro-form input { width:100%; box-sizing:border-box; font:inherit; font-family:var(--mono); font-size:16px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink); }
-.pro-name { display:flex; align-items:center; gap:8px; }
-.pro-name input { flex:1; min-width:0; }
-.pro-name span { font-family:var(--mono); color:var(--muted); font-size:13px; white-space:nowrap; }
-.pro-form .send-button { justify-self:start; }
+/* Remote access card in Settings + Connect pairing helpers */
+.remote-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+.remote-head h3 { margin:0; }
+.remote-link-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:10px 0 8px; }
+.remote-link-row .remote-link { margin:0; }
+.remote-form { display:grid; gap:12px; margin:16px 0 6px; padding-top:14px; border-top:1px solid var(--line); max-width:560px; }
+.remote-subfields { display:grid; gap:10px; }
+.remote-subfields.hidden, .remote-form.hidden { display:none; }
+.remote-field { display:grid; gap:5px; }
+.remote-field span { font:600 10.5px var(--mono); letter-spacing:.06em; color:var(--quiet); }
+.remote-field input, .remote-field select { width:100%; box-sizing:border-box; font:inherit; font-family:var(--mono); font-size:14px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink); }
+.remote-field select { font-family:var(--sans); }
+.auth-pair-wrap { display:grid; gap:6px; margin-top:4px; }
+.auth-pair-wrap.hidden { display:none; }
+.connect-meta { display:flex; justify-content:center; margin:-6px 0 10px; }
+.connect-pair-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:12px 0; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--sidebar); text-align:left; }
+.connect-pair-bar.hidden { display:none; }
+.connect-code-box { display:grid; gap:2px; }
+.connect-code-box span { font:600 10px var(--mono); letter-spacing:.06em; color:var(--quiet); }
+.connect-code-box strong { font:700 20px/1.1 var(--mono); letter-spacing:.12em; color:var(--ink); }
+.connect-pair-actions { display:flex; gap:6px; flex-wrap:wrap; }
 
 /* End session: a quiet danger button beside the drawer's close button */
 .drawer-header .end-session { margin-left:auto; margin-right:10px; font:600 12px var(--sans); color:#b4432c; background:transparent; border:1px solid currentColor; border-radius:8px; padding:7px 11px; min-height:36px; cursor:pointer; white-space:nowrap; }
 .drawer-header .end-session:hover { background:#b4432c; color:#fff; }
 .drawer-header .end-session:disabled { opacity:.6; cursor:wait; }
 .drawer-header .end-session.hidden { display:none; }
+.drawer-header .end-session.quiet { color:var(--muted); }
+.drawer-header .end-session.quiet:hover { background:var(--muted); color:#fff; }
+.cleanup-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin:0 0 12px; padding:10px 12px; border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--muted); font-size:13px; }
+.cleanup-bar.hidden { display:none; }
+.cleanup-bar.link-only { padding:0; border:0; background:none; justify-content:flex-end; margin-bottom:6px; }
+.cleanup-bar span { flex:1 1 220px; min-width:0; }
+.cleanup-bar b { color:var(--ink); font-weight:600; }
+.live-pill.clutter, .live-pill.cleared { color:var(--quiet); background:transparent; border-color:var(--line); margin-left:6px; }
 
 /* Attachments: a paperclip in each composer, uploaded files as chips above the text */
 .attach-button { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--muted); font: 500 13px var(--sans); cursor: pointer; }
@@ -758,3 +783,8 @@ img.brand-mark { background: none; image-rendering: pixelated; }
   .ship-actions button { min-height: 40px; }
   .ship-actions .send-button { flex: 1; margin-left: 0; padding: 10px 12px; }
 }
+
+/* "Talk to a session" sits with the session and model chips, so it is in view however far the chat is scrolled. */
+.drawer-composer .drawer-actions .talk-button { height: 32px; padding: 0 14px; border-radius: 999px; background: var(--surface); color: var(--ink); border: 1px solid var(--line); font: 500 12.5px var(--sans); white-space: nowrap; min-width: 0; }
+.drawer-composer .drawer-actions .talk-button:hover { background: var(--surface); border-color: var(--accent); color: var(--accent); }
+@media (max-width: 700px) { .drawer-composer .drawer-actions .talk-button { height: auto; font-size: 14px; border-radius: 10px; } }

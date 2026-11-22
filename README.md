@@ -8,7 +8,7 @@
 
 ▶ [Watch the 80-second tour](https://shed-sigma.vercel.app/#tour) · [Download the video (MP4)](https://shed-sigma.vercel.app/shed-tour.mp4)
 
-A local, internet-accessible task plane for desktop coding agents. It shows sessions that are currently open in Codex, Claude Code, Gemini, Pi, and OpenCode, refreshes their transcripts, and lets you continue them from a browser. You can also start a completely new coding session from a phone when no desktop session exists.
+A local, internet-accessible task plane for desktop coding agents. It shows sessions that are currently open in Codex, Claude Code, Gemini, Pi, OpenCode, and Antigravity, refreshes their transcripts, and lets you continue them from a browser. You can also start a completely new coding session from a phone when no desktop session exists.
 
 ## Install
 
@@ -24,22 +24,27 @@ curl -fsSL https://shed-sigma.vercel.app/install.sh | sh -s -- --uninstall
 
 Options (environment variables): `SHED_HOME` (default `~/.shed`), `SHED_PORT` (default 4378), `SHED_REF` (git branch, default `main`).
 
-## Shed Pro
+## Remote access
 
-The free tunnel's address changes whenever it restarts, which breaks the Home Screen app and its push notifications. Shed Pro will give the Mac a permanent `https://<name>.shed.link` address. It isn't on sale yet: [join the waitlist](https://shed-sigma.vercel.app/#pro) to hear when it is.
+Shed is completely free and open source, with four built-in remote transport modes configurable on your Mac under **Settings → Remote access** (or via environment variables):
 
-Once you have a licence key, turn it on by pasting it under **Settings → Permanent address** on the Mac. Shed asks the relay (`site/api/relay.js`) for a Cloudflare named tunnel and saves its token in `.jev-data/relay.json`. `server/tunnel.js` then switches from the Quick Tunnel to that tunnel. Traffic goes from Cloudflare straight to your Mac; the relay only manages the tunnel, and your password and device approval still apply.
+- **Auto (default):** Uses your Cloudflare Named Tunnel if configured, otherwise **Tailscale HTTPS** if Tailscale is running and Serve is enabled, otherwise starts a zero-setup **Cloudflare Quick Tunnel**.
+- **Tailscale (private permanent HTTPS):** Runs `tailscale serve --bg --https=443 http://127.0.0.1:4378` so your Mac gets a permanent private `https://<mac>.<tailnet>.ts.net` address over WireGuard with zero public exposure.
+- **Cloudflare Tunnel (own domain, permanent):** Point a free Cloudflare Zero Trust tunnel at `http://127.0.0.1:4378` and paste your domain and tunnel token in **Settings → Remote access** (or set `SHED_TUNNEL_HOST` and `SHED_TUNNEL_TOKEN`). Your Home Screen app, push notifications, and iPhone Shortcuts stay working across restarts.
+- **Cloudflare Quick Tunnel (instant, temporary):** Works immediately with no account; the random `*.trycloudflare.com` URL rotates if the tunnel restarts.
+- **Custom HTTPS URL / Off:** Point Shed at your own reverse proxy (`SHED_PUBLIC_URL`), or turn remote access off completely.
 
 ## Open it
 
-The server starts automatically when this Mac signs in. Open `http://localhost:4378` on the Mac once and choose **Set a password for the first time**. From any Wi-Fi or cellular network, use the HTTPS address shown under **Settings → Phone access** and sign in with that password.
+The server starts automatically when this Mac signs in. Open `http://localhost:4378` on the Mac once and choose **Set a password for the first time**. From any phone or other computer, scan the QR code or enter the one-time **6-digit pairing code** shown under **Connect your phone**, or open the HTTPS link under **Settings → Remote access** and approve the device on your Mac.
 
-The Mac must stay awake and connected to the internet. The Cloudflare Quick Tunnel URL can change when the tunnel restarts. Its current value is stored in `.jev-data/remote-url`. Shed Pro gives a permanent hostname.
+The Mac must stay awake and connected to the internet. The current remote address is stored in `.jev-data/remote-url` (and full status in `.jev-data/remote-status.json`).
 
-To run it manually:
+To run manually:
 
 ```bash
 npm start
+npm run tunnel
 ```
 
 ## Local Laya routing
@@ -123,6 +128,7 @@ From the same tab, **Commit**, **Push** (it commits first if there is anything t
 | Gemini | `~/.gemini/tmp/*/chats` | Installed `gemini` CLI | `gemini --resume` |
 | Pi | `~/.pi/agent/sessions` | Installed `pi` CLI | `pi --session` |
 | OpenCode | `opencode session list --format json` | Installed `opencode` CLI | `opencode run --session` |
+| Antigravity | `~/.gemini/antigravity` & `~/.gemini/antigravity-cli` | Live `agy` in Terminal & active Desktop App DB state | `agy --conversation … -i` (typed into open tab) |
 
 An absent CLI leaves file-backed history visible but disables sending tasks to that harness. OpenCode is installed on this Mac. Gemini sessions remain scoped to their original project.
 

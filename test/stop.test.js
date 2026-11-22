@@ -42,7 +42,7 @@ test('never signals a process that is not the named agent', async () => {
   await firstLine(child);
   assert.deepEqual(await stopAgent(child.pid, 'codex'), { stopped:false, reason:'not-running' });
   assert.ok(alive(child.pid));
-  process.kill(-child.pid, 'SIGKILL');
+  assert.deepEqual(await stopAgent(child.pid, ['agy', 'claude']), { stopped:true, forced:false });
 });
 
 test('a launcher-led job (like npm codex) is ended as a whole', async () => {

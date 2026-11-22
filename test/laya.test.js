@@ -28,6 +28,9 @@ test('Laya can choose a harness for a fresh task', async () => {
   assert.equal(result.harness, 'gemini');
   assert.equal(result.session, null);
   assert.equal(result.source, 'laya');
+  const agy = await decideRoute('Plan and verify the UI in browser', [], 'auto', null, { engine:engine('new_antigravity'), availableHarnesses:['codex','antigravity'] });
+  assert.equal(agy.harness, 'antigravity');
+  assert.equal(agy.source, 'laya');
 });
 
 test('invalid Laya choice falls back to local matching', async () => {

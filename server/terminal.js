@@ -48,10 +48,12 @@ export function agentInForeground(tty, command) {
 }
 
 export function pidOnTty(tty, command) {
+  if (!tty) return null;
+  const names = Array.isArray(command) ? command : [command];
   const result = spawnSync('/bin/ps', ['-t', tty.replace('/dev/', ''), '-o', 'pid=,comm='], { encoding:'utf8', timeout:2000 });
   for (const line of (result.stdout || '').split('\n')) {
     const match = line.trim().match(/^(\d+)\s+(.+)$/);
-    if (match && path.basename(match[2]) === command) return Number(match[1]);
+    if (match && names.includes(path.basename(match[2]))) return Number(match[1]);
   }
   return null;
 }
@@ -88,7 +90,8 @@ end findTab
 // With `agent`, text is only typed while that agent is the terminal's foreground program, checked again before Return:
 // if the agent has exited, Return would run the text as a shell command, so the line is wiped instead.
 export function typeIntoTerminal(tty, text, { prompt = false, agent = '' } = {}) {
-  if (agent && !agentInForeground(tty, agent)) throw new Error(`${agent} is no longer running in that Terminal tab.`);
+  const agentName = Array.isArray(agent) ? agent[0] : agent;
+  if (agent && !agentInForeground(tty, agent)) throw new Error(`${agentName} is no longer running in that Terminal tab.`);
   const send = value => {
     const result = osascript(`${findTab}
 on run argv
@@ -103,7 +106,7 @@ end run`, [tty, value]);
   // do script always ends with Return; inside a bracketed paste that Return stays part of the text, and a separate Return submits it.
   send(`\u001b[200~${text}\u001b[201~`);
   spawnSync('/bin/sleep', ['0.6']);
-  if (agent && !agentInForeground(tty, agent)) { send('\u0015'); throw new Error(`${agent} exited while the message was being typed.`); }
+  if (agent && !agentInForeground(tty, agent)) { send('\u0015'); throw new Error(`${agentName} exited while the message was being typed.`); }
   send('');
 }
 
@@ -176,7 +179,8 @@ end run`, [tty]);
 }
 
 export async function typeIntoTerminalAsync(tty, text, { prompt = false, agent = '' } = {}) {
-  if (agent && !agentInForeground(tty, agent)) throw new Error(`${agent} is no longer running in that Terminal tab.`);
+  const agentName = Array.isArray(agent) ? agent[0] : agent;
+  if (agent && !agentInForeground(tty, agent)) throw new Error(`${agentName} is no longer running in that Terminal tab.`);
   const send = async value => {
     const result = useWorker ? await terminalCall('type', { tty, text:value }) : await osascriptAsync(`${findTab}
 on run argv
@@ -190,7 +194,7 @@ end run`, [tty, value]);
   if (!prompt) return send(text);
   await send(`\u001b[200~${text}\u001b[201~`);
   await pause(600);
-  if (agent && !agentInForeground(tty, agent)) { await send('\u0015'); throw new Error(`${agent} exited while the message was being typed.`); }
+  if (agent && !agentInForeground(tty, agent)) { await send('\u0015'); throw new Error(`${agentName} exited while the message was being typed.`); }
   await send('');
 }
 

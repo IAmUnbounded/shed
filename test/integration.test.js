@@ -43,8 +43,27 @@ test('discovers a desktop session and resumes it through the task API', async ()
   const opencode = path.join(bin, 'opencode');
   fs.writeFileSync(opencode, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'fixture'; exit 0; fi\nif [ "$1" = "auth" ]; then echo '0 credentials'; exit 0; fi\nif [ "$1" = "session" ]; then echo '[{"id":"oc-fixture","title":"OpenCode research","directory":"${project}","time":{"updated":1780000000000}}]'; elif [ "$1" = "export" ]; then echo '{"messages":[]}'; fi\n`);
   fs.chmodSync(opencode, 0o755);
+  const agyId = '22222222-3333-4444-8555-666666666666';
+  const agyLogs = path.join(home, '.gemini', 'antigravity-cli', 'brain', agyId, '.system_generated', 'logs');
+  fs.mkdirSync(agyLogs, { recursive:true });
+  fs.mkdirSync(path.join(home, '.gemini', 'antigravity-cli', 'cache'), { recursive:true });
+  fs.writeFileSync(path.join(home, '.gemini', 'antigravity-cli', 'cache', 'last_conversations.json'), JSON.stringify({ [project]:agyId }));
+  fs.writeFileSync(path.join(agyLogs, 'transcript.jsonl'), [
+    JSON.stringify({ step_index:0, source:'USER_EXPLICIT', type:'USER_INPUT', created_at:'2026-10-01T00:00:00Z', content:'<USER_REQUEST>\nVerify the lunar dashboard in Antigravity\n</USER_REQUEST>' }),
+    JSON.stringify({ step_index:1, source:'MODEL', type:'PLANNER_RESPONSE', created_at:'2026-10-01T00:00:05Z', model:'gemini-4-neon-high', content:'Ready to verify the dashboard.' }),
+  ].join('\n') + '\n');
+  const agyAppId = '44444444-5555-4666-8777-888888888888';
+  const agyAppLogs = path.join(home, '.gemini', 'antigravity', 'brain', agyAppId, '.system_generated', 'logs');
+  fs.mkdirSync(agyAppLogs, { recursive:true });
+  fs.writeFileSync(path.join(agyAppLogs, 'transcript.jsonl'), [
+    JSON.stringify({ step_index:0, source:'USER_EXPLICIT', type:'USER_INPUT', created_at:'2026-10-02T00:00:00Z', cwd:project, content:'<USER_REQUEST>\nDesktop app brainstorming thread\n</USER_REQUEST>' }),
+    JSON.stringify({ step_index:1, source:'MODEL', type:'PLANNER_RESPONSE', created_at:'2026-10-02T00:00:05Z', model:'gemini-4-neon-high', content:'Here are three ideas.' }),
+  ].join('\n') + '\n');
+  const agy = path.join(bin, 'agy');
+  fs.writeFileSync(agy, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'agy 1.5.7 fixture'; exit 0; fi\nif [ "$1" = "models" ]; then printf 'gemini-4-neon-high Gemini 4 Neon (High)\\ngemini-3.8-flash-medium Gemini 3.8 Flash (Medium)\\n'; exit 0; fi\nprintf '%s\\n' "$@" > "$JEV_FAKE_AGY_ARGS"\ncid="33333333-4444-4555-8666-777777777777"\nprev=""\nfor arg in "$@"; do if [ "$prev" = "--conversation" ]; then cid="$arg"; fi; prev="$arg"; done\necho '{"event":"init","conversation_id":"'"$cid"'","init":{"cwd":"'"$PWD"'","permission_mode":"request-review"}}'\necho '{"event":"step_update","step_update":{"conversation_id":"'"$cid"'","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Antigravity "}}'\necho '{"event":"step_update","step_update":{"conversation_id":"'"$cid"'","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"fixture complete"}}'\necho '{"event":"result","result":{"conversation_id":"'"$cid"'","status":"SUCCESS","response":"Antigravity fixture complete"}}'\n`);
+  fs.chmodSync(agy, 0o755);
   const port = await freePort(), token = 'integration-secret';
-  const child = spawn(process.execPath, ['server/index.js'], { cwd:path.resolve('.'), env:{ ...process.env, HOME:home, PATH:`${bin}:/usr/bin:/bin`, LAYA_DATA_DIR:path.join(dir, 'data'), JEV_FAKE_ARGS:path.join(dir, 'args'), JEV_FAKE_QUEUE_ARGS:path.join(dir, 'queue-args'), JEV_FAKE_CONFLICT:path.join(dir, 'conflict'), LAYA_TOKEN:token, LAYA_PRELOAD:'0', LAYA_HEADLESS_CLAUDE:'1', LAYA_HEADLESS_CODEX:'1', SHED_LAN:'1', HOST:'127.0.0.1', PORT:String(port) }, stdio:'ignore' });
+  const child = spawn(process.execPath, ['server/index.js'], { cwd:path.resolve('.'), env:{ ...process.env, HOME:home, PATH:`${bin}:/usr/bin:/bin`, LAYA_DATA_DIR:path.join(dir, 'data'), JEV_FAKE_ARGS:path.join(dir, 'args'), JEV_FAKE_AGY_ARGS:path.join(dir, 'agy-args'), JEV_FAKE_QUEUE_ARGS:path.join(dir, 'queue-args'), JEV_FAKE_CONFLICT:path.join(dir, 'conflict'), LAYA_TOKEN:token, LAYA_PRELOAD:'0', LAYA_HEADLESS_CLAUDE:'1', LAYA_HEADLESS_CODEX:'1', LAYA_HEADLESS_ANTIGRAVITY:'1', SHED_LAN:'1', HOST:'127.0.0.1', PORT:String(port) }, stdio:'ignore' });
   try {
     const base = `http://127.0.0.1:${port}`;
     await waitFor(`${base}/api/me`);
@@ -78,14 +97,33 @@ test('discovers a desktop session and resumes it through the task API', async ()
     const thirdId = (await third.json()).device.id;
     assert.equal((await fetch(`${base}/api/devices/${thirdId}/approve`, { method:'POST', headers:viaTunnel('203.0.113.7', { cookie:`shed_session=${pendingCookie}` }) })).status, 403);
 
-    // The QR code's one-time pairing code approves a device straight away, once.
+    // The QR code's one-time pairing code and the 6-digit short code each approve a device straight away, once.
     const connect = await (await fetch(`${base}/api/connect`, { headers })).json();
     const pairCode = (connect.url.match(/#pair=([\w-]+)/) || [])[1];
     assert.ok(pairCode, 'the QR link carries a pairing code when opened on the Mac');
+    assert.match(connect.shortCode || '', /^\d{3}-\d{3}$/, 'a 6-digit pairing code is minted on the Mac');
     const paired = await fetch(`${base}/api/auth`, { method:'POST', headers:viaTunnel('192.0.2.9'), body:JSON.stringify({ password:'fixture-password', pairCode }) });
     assert.equal(paired.status, 200);
     const reused = await fetch(`${base}/api/auth`, { method:'POST', headers:viaTunnel('192.0.2.10'), body:JSON.stringify({ password:'fixture-password', pairCode }) });
     assert.equal(reused.status, 202, 'a pairing code works once');
+    const viaTailscale = (ip, extra = {}) => ({ 'Content-Type':'application/json', 'x-forwarded-proto':'https', 'x-forwarded-for':ip, 'tailscale-user-login':'alice@example.com', ...extra });
+    const pairedShort = await fetch(`${base}/api/auth`, { method:'POST', headers:viaTailscale('100.64.0.9'), body:JSON.stringify({ password:'fixture-password', pairCode:connect.shortCode.replace('-', ' ') }) });
+    assert.equal(pairedShort.status, 200, 'the 6-digit pairing code approves a device over Tailscale');
+    const reusedShort = await fetch(`${base}/api/auth`, { method:'POST', headers:viaTailscale('100.64.0.10'), body:JSON.stringify({ password:'fixture-password', pairCode:connect.shortCode }) });
+    assert.equal(reusedShort.status, 202, 'the 6-digit pairing code works once');
+    assert.equal((await fetch(`${base}/api/sessions`, { headers:viaTailscale('100.64.0.11', { Authorization:`Bearer ${token}` }) })).status, 401, 'the master token is refused over Tailscale');
+
+    // Remote access settings: readable everywhere, editable only on the Mac, and Pro routes are gone.
+    assert.equal((await fetch(`${base}/api/pro`, { headers })).status, 404, 'Pro endpoints are removed');
+    const remoteRes = await fetch(`${base}/api/remote`, { headers });
+    assert.equal(remoteRes.status, 200);
+    assert.equal((await remoteRes.json()).canChange, true);
+    const tsCookie = cookieOf(pairedShort);
+    assert.equal((await fetch(`${base}/api/remote`, { method:'POST', headers:viaTailscale('100.64.0.9', { cookie:`shed_session=${tsCookie}` }), body:JSON.stringify({ mode:'off' }) })).status, 403, 'remote devices cannot change transport mode');
+    const savedRemote = await (await fetch(`${base}/api/remote`, { method:'POST', headers, body:JSON.stringify({ mode:'custom', customUrl:'https://shed.tail.example' }) })).json();
+    assert.equal(savedRemote.status.url, 'https://shed.tail.example');
+    assert.equal(savedRemote.status.permanent, true);
+    await fetch(`${base}/api/remote`, { method:'POST', headers, body:JSON.stringify({ mode:'auto' }) });
 
     // Wrong passwords are limited per visitor, so a stranger cannot lock out someone else.
     for (let i = 0; i < 8; i++) await fetch(`${base}/api/auth`, { method:'POST', headers:viaTunnel('203.0.113.66'), body:JSON.stringify({ password:'wrong' }) });
@@ -119,11 +157,19 @@ test('discovers a desktop session and resumes it through the task API', async ()
     assert.match(connectInfo.link, /^http:\/\/.+:\d+$/, 'without a tunnel, the phone link is the Wi-Fi address');
     assert.match(connectInfo.qr, /^<svg/);
     assert.equal(health.harnesses.opencode.state, 'needs_auth');
+    assert.equal(health.harnesses.antigravity.state, 'ready');
     const list = await (await fetch(`${base}/api/sessions`, { headers })).json();
-    assert.equal(list.sessions.length, 3);
+    assert.equal(list.sessions.length, 5);
     assert.ok(list.sessions.some(s => s.id === `codex:${sessionId}`));
     assert.ok(list.sessions.some(s => s.id === 'pi:pi-fixture'));
     assert.ok(list.sessions.some(s => s.id === 'opencode:oc-fixture'));
+    assert.ok(list.sessions.some(s => s.id === `antigravity:${agyId}`));
+    assert.ok(list.sessions.some(s => s.id === `antigravity:${agyAppId}` && s.agAppOnly === true));
+    const agyDetail = await (await fetch(`${base}/api/sessions/${encodeURIComponent(`antigravity:${agyId}`)}`, { headers })).json();
+    assert.deepEqual(agyDetail.messages.map(m => [m.role, m.text]), [
+      ['user', 'Verify the lunar dashboard in Antigravity'],
+      ['assistant', 'Ready to verify the dashboard.'],
+    ]);
     const preview = await (await fetch(`${base}/api/route`, { method:'POST', headers, body:JSON.stringify({ prompt:'Please improve the lunar dashboard', sessionId:`codex:${sessionId}` }) })).json();
     assert.equal(preview.route.session.id, `codex:${sessionId}`);
     const savedModels = await fetch(`${base}/api/models`, { method:'POST', headers, body:JSON.stringify({ harness:'codex', models:[{id:'fixture-fast',label:'Fast',description:'Quick work',enabled:true},{id:'fixture-deep',label:'Deep',description:'Hard work',enabled:true}], defaultModel:'fixture-fast' }) });
@@ -227,6 +273,58 @@ test('discovers a desktop session and resumes it through the task API', async ()
     assert.equal(secondAuto.cwd, path.join(home, 'Shed Workspaces', 'fix-flaky-login-test-2'));
     assert.ok(fs.statSync(firstAuto.cwd).isDirectory());
     assert.equal(fs.existsSync(freshTask.cwd), true);
+
+    // Antigravity: resume an existing session with model + skipPermissions, and start a fresh session capturing conversation_id.
+    const agyResumeRes = await fetch(`${base}/api/tasks`, { method:'POST', headers, body:JSON.stringify({ prompt:'Finish verifying the lunar dashboard', sessionId:`antigravity:${agyId}`, model:'gemini-4-neon-high', skipPermissions:true }) });
+    assert.equal(agyResumeRes.status, 201);
+    const agyResumeId = (await agyResumeRes.json()).task.id;
+    let agyResumeTask;
+    for (let i = 0; i < 60; i++) {
+      agyResumeTask = (await (await fetch(`${base}/api/tasks/${agyResumeId}`, { headers })).json()).task;
+      if (agyResumeTask.status !== 'running') break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(agyResumeTask.status, 'completed');
+    assert.equal(agyResumeTask.output, 'Antigravity fixture complete');
+    assert.equal(agyResumeTask.sessionId, `antigravity:${agyId}`);
+    const agyResumeArgs = fs.readFileSync(path.join(dir, 'agy-args'), 'utf8');
+    assert.match(agyResumeArgs, /--output-format\nstream-json/);
+    assert.match(agyResumeArgs, /--model\ngemini-4-neon-high/);
+    assert.match(agyResumeArgs, new RegExp(`--conversation\\n${agyId}`));
+    assert.match(agyResumeArgs, /--dangerously-skip-permissions/);
+
+    const agyNewRes = await fetch(`${base}/api/tasks`, { method:'POST', headers, body:JSON.stringify({ prompt:'Start an Antigravity workspace', harness:'antigravity', model:'gemini-3.8-flash-medium', newSession:true, newWorkspace:'agy-project' }) });
+    assert.equal(agyNewRes.status, 201);
+    const agyNewId = (await agyNewRes.json()).task.id;
+    let agyNewTask;
+    for (let i = 0; i < 60; i++) {
+      agyNewTask = (await (await fetch(`${base}/api/tasks/${agyNewId}`, { headers })).json()).task;
+      if (agyNewTask.status !== 'running') break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(agyNewTask.status, 'completed');
+    assert.equal(agyNewTask.sessionId, 'antigravity:33333333-4444-4555-8666-777777777777');
+    const agySettings = JSON.parse(fs.readFileSync(path.join(home, '.gemini', 'antigravity-cli', 'settings.json'), 'utf8'));
+    assert.ok(agySettings.trustedWorkspaces.includes(path.resolve(home, 'Shed Workspaces', 'agy-project')));
+
+    // Continuing an Antigravity Desktop App session omits --conversation and carries recent context into a new CLI session.
+    const agyAppRes = await fetch(`${base}/api/tasks`, { method:'POST', headers, body:JSON.stringify({ prompt:'Expand on idea two', sessionId:`antigravity:${agyAppId}`, model:'gemini-4-neon-high' }) });
+    assert.equal(agyAppRes.status, 201);
+    const agyAppCreated = (await agyAppRes.json()).task;
+    assert.equal(agyAppCreated.handoffFrom, `antigravity:${agyAppId}`);
+    assert.equal(agyAppCreated.cwd, project);
+    let agyAppTask;
+    for (let i = 0; i < 60; i++) {
+      agyAppTask = (await (await fetch(`${base}/api/tasks/${agyAppCreated.id}`, { headers })).json()).task;
+      if (agyAppTask.status !== 'running') break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(agyAppTask.status, 'completed');
+    assert.equal(agyAppTask.sessionId, 'antigravity:33333333-4444-4555-8666-777777777777');
+    const agyAppArgs = fs.readFileSync(path.join(dir, 'agy-args'), 'utf8');
+    assert.doesNotMatch(agyAppArgs, /--conversation/);
+    assert.match(agyAppArgs, /Desktop app brainstorming thread/);
+    assert.match(agyAppArgs, /Expand on idea two/);
   } finally {
     child.kill('SIGTERM');
     fs.rmSync(dir, { recursive:true, force:true, maxRetries:10, retryDelay:100 }); // the server may still be writing as it exits

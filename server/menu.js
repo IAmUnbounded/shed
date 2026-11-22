@@ -10,7 +10,7 @@
 // Some lists are numbered and some are not, and a number plus Return does not choose on unnumbered ones (the Return
 // picks the highlighted option instead). So Shed always chooses by moving the pointer with arrow keys, then Return.
 const POINTER = /^(\s*)([❯›])\s+(\S.*)$/;
-const HINT = /Enter to confirm|Esc to cancel|Press enter|to cancel|Tab to amend|enter to select|to navigate/i;
+const HINT = /Enter to confirm|Esc to cancel|Press enter|to cancel|Tab to amend|enter to select|enter Confirm|enter Toggle|to navigate/i;
 const RULE = /^\s*[─━]{3,}\s*$/;
 // Questions with several options and a description under each put the hint far below the pointer.
 const HINT_REACH = 30;

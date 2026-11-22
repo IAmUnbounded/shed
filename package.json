@@ -7,6 +7,7 @@
   "type": "module",
   "scripts": {
     "start": "node server/index.js",
+    "tunnel": "node server/tunnel.js",
     "dev": "node --watch server/index.js",
     "test": "node --test",
     "test:latency": "node --test test/latency.test.js",

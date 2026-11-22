@@ -7,30 +7,31 @@ import zlib from 'node:zlib';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
-import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript } from './sessions.js';
-import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState, footerMode, activeOnScreen } from './live.js';
+import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript, antigravityCliTranscriptPath, antigravityRunStatus, antigravityTerminalProgress, findAntigravityTranscript } from './sessions.js';
+import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState, footerMode, activeOnScreen, antigravityLiveState, antigravityConversationForPid } from './live.js';
 import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent, closeTerminalTab, ttyOf, runInTab, canSkipPermissions } from './terminal.js';
 import { autoClosePrefs, idleSessions } from './idle.js';
 import { exchangeStore, exchangeSummary, refusal, depthFor, messagePrompt, introductionPrompt, describe } from './exchanges.js';
 import { rankSessions, autoRoutePrefs, routableHarnesses } from './router.js';
 import { decideRoute, decideFollowup, decideModel, probeLaya, getLaya, layaStatus } from './laya.js';
-import { harnesses, modelConfig, validateModelConfig } from './models.js';
+import { harnesses, cliCommand, cliProcessNames, modelConfig, validateModelConfig, offeredModels } from './models.js';
 import { harnessHealth, refreshHarnessHealth } from './health.js';
 import { initPush, pushPublicKey, subscribe, unsubscribe, notify, isSubscribed, pushCount } from './notify.js';
 import { listArtifacts, resolveInside, sendFile } from './files.js';
 import { repoRoot, changes as gitChanges, fileDiff, commitAll, push as gitPush, pullRequest, createPullRequest, failedCheckLogs, sessionWorktree } from './git.js';
-import { proStore } from './pro.js';
+import { remoteStore, probeTailscale, findCloudflared } from './remote.js';
 import { interruptCodexThread } from './codex-app.js';
 import { uploadStore, attachmentNote, UPLOAD_ID } from './uploads.js';
 import { parseMenu, keysToChoose } from './menu.js';
 import { extractUrl, fetchShared, sharePrompt, signedShortcut } from './share.js';
+import { cleanupSuggestions } from './cleanup.js';
+import { trustShedWorkspace } from './trust.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
 const dataDir = process.env.LAYA_DATA_DIR || process.env.JEV_DATA_DIR || path.join(root, '.jev-data');
 const taskFile = path.join(dataDir, 'tasks.json');
 const settingsFile = path.join(dataDir, 'settings.json');
-const remoteUrlFile = path.join(dataDir, 'remote-url');
 const tokenFile = path.join(root, '.laya-token');
 const legacyTokenFile = path.join(root, '.jev-token');
 const port = Number(process.env.PORT || 4378);
@@ -41,13 +42,13 @@ const host = process.env.HOST || (lanEnabled ? '0.0.0.0' : '127.0.0.1');
 fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 fs.chmodSync(dataDir, 0o700);
 const token = process.env.LAYA_TOKEN || process.env.JEV_TOKEN || getToken();
-const available = Object.fromEntries(['codex', 'claude', 'gemini', 'pi', 'opencode'].map(name => [name, commandExists(name)]));
+const available = Object.fromEntries(harnesses.map(name => [name, commandExists(cliCommand(name))]));
 const active = new Map();
 let cached = { at: 0, sessions: [] };
 let tasks = loadTasks();
 let settings = loadSettings();
 initPush(dataDir);
-const pro = proStore(dataDir, { port });
+const remote = remoteStore(dataDir);
 const uploads = uploadStore(dataDir);
 const attempts = new Map();
 const exchanges = exchangeStore(dataDir);
@@ -56,6 +57,16 @@ const agentKey = crypto.randomBytes(24).toString('base64url');
 fs.writeFileSync(path.join(dataDir, 'agent.json'), JSON.stringify({ port, key:agentKey }), { mode:0o600 });
 const shedCli = (cli => /^[\w./-]+$/.test(cli) ? cli : `'${cli.replace(/'/g, `'\\''`)}'`)(path.join(root, 'bin', 'shed'));
 
+// Reflect CLIs installed or removed after Shed started as soon as the next health check runs.
+function syncAvailable(health = harnessHealth()) {
+  for (const name of harnesses) {
+    if (health?.[name]?.checkedAt) available[name] = Boolean(health[name].installed);
+  }
+  return available;
+}
+function checkHealth(force = false) {
+  return refreshHarnessHealth(force).then(health => { syncAvailable(health); return health; });
+}
 function getToken() {
   if (fs.existsSync(tokenFile)) return fs.readFileSync(tokenFile, 'utf8').trim();
   if (fs.existsSync(legacyTokenFile)) {
@@ -67,12 +78,11 @@ function getToken() {
   fs.writeFileSync(tokenFile, value + '\n', { mode: 0o600, flag: 'wx' });
   return value;
 }
+function remoteStatus() {
+  return remote.readStatus();
+}
 function remoteUrl() {
-  try {
-    const value = fs.readFileSync(remoteUrlFile, 'utf8').trim();
-    // A Quick Tunnel address, or the permanent Shed Pro hostname; tunnel.js writes it once the tunnel is connected.
-    return /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(value) ? value : '';
-  } catch { return ''; }
+  return remote.url();
 }
 function commandExists(command) {
   return spawnSync('which', [command], { encoding: 'utf8' }).status === 0;
@@ -113,14 +123,21 @@ function verifyPassword(password, stored) {
   } catch { return false; }
 }
 const LOOPBACK = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
-const PROXY_HEADERS = ['cf-connecting-ip', 'cf-ray', 'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'forwarded'];
-// A request typed on this Mac: loopback, and not relayed by the tunnel (which also connects over loopback).
+const PROXY_HEADERS = ['cf-connecting-ip', 'cf-ray', 'tailscale-user-login', 'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'forwarded'];
+// A request typed on this Mac: loopback, and not relayed by a tunnel or reverse proxy (which also connect over loopback).
 function isDirectLocal(req) {
   return LOOPBACK.includes(req.socket.remoteAddress) && !PROXY_HEADERS.some(h => req.headers[h] !== undefined);
 }
-// The visitor's real address: cloudflared connects locally and reports the original one in CF-Connecting-IP.
+// The visitor's real address: cloudflared reports CF-Connecting-IP, Tailscale and reverse proxies report X-Forwarded-For.
 function clientIp(req) {
-  if (LOOPBACK.includes(req.socket.remoteAddress) && typeof req.headers['cf-connecting-ip'] === 'string') return req.headers['cf-connecting-ip'].slice(0, 64);
+  if (LOOPBACK.includes(req.socket.remoteAddress)) {
+    if (typeof req.headers['cf-connecting-ip'] === 'string') return req.headers['cf-connecting-ip'].slice(0, 64);
+    if (typeof req.headers['x-forwarded-for'] === 'string') {
+      const first = req.headers['x-forwarded-for'].split(',')[0]?.trim();
+      if (first) return first.slice(0, 64);
+    }
+    if (typeof req.headers['tailscale-user-login'] === 'string') return req.headers['tailscale-user-login'].slice(0, 64);
+  }
   return req.socket.remoteAddress || 'unknown';
 }
 function isLocalRequest(req) {
@@ -135,34 +152,64 @@ function saveSettings() {
   fs.writeFileSync(settingsFile, JSON.stringify(settings), { mode:0o600 });
   fs.chmodSync(settingsFile, 0o600);
 }
+// Every session, with whether it was cleared from the list and, if not, why it looks like clutter. Clearing only hides a
+// session in Shed; one that comes back to life (resumed on the Mac or from Shed) is back in the list.
 function sessions(force = false) {
-  if (force || Date.now() - cached.at > 10000) cached = { at: Date.now(), sessions: withCodexTerminals(discoverSessions()) };
+  if (force || Date.now() - cached.at > 10000) {
+    const list = withTrackedTerminals(discoverSessions());
+    const hidden = new Set(settings.hiddenSessions || []);
+    const revived = list.filter(s => s.liveState !== 'history' && hidden.has(s.id));
+    if (revived.length) { for (const s of revived) hidden.delete(s.id); settings = { ...settings, hiddenSessions:[...hidden] }; saveSettings(); }
+    const clutter = cleanupSuggestions(list.filter(s => !hidden.has(s.id)));
+    cached = { at: Date.now(), sessions: list.map(s => ({ ...s, hidden:hidden.has(s.id), cleanup:clutter.get(s.id) || '' })) };
+  }
   return cached.sessions;
 }
-// Codex runs through a background service, so its Terminal windows can't be found from open files.
-// Shed remembers the windows it opened (on the task) and treats a session as live while Codex still runs there.
-function codexTerminals() {
+function hideSessions(ids, hide) {
+  const known = new Set(sessions().map(s => s.id));
+  const hidden = new Set(settings.hiddenSessions || []);
+  for (const id of ids) { if (!hide) hidden.delete(id); else if (known.has(id)) hidden.add(id); }
+  settings = { ...settings, hiddenSessions:[...hidden].slice(-5000) }; saveSettings();
+  return sessions(true);
+}
+// Codex runs through a background service and Antigravity can switch or reopen files in its Terminal tab.
+// Shed remembers the Terminal windows it opened (on the task) and treats a session as live while its agent still runs there.
+function trackedTerminals() {
   const found = new Map();
   for (const task of tasks) {
-    if (task.harness !== 'codex' || task.delivery !== 'terminal' || !task.nativeSessionId || !task.tty || found.has(task.nativeSessionId)) continue;
-    found.set(task.nativeSessionId, task.tty);
+    if (!['codex', 'antigravity'].includes(task.harness) || task.delivery !== 'terminal' || !task.nativeSessionId || !task.tty) continue;
+    const key = `${task.harness}:${task.nativeSessionId}`;
+    if (found.has(key)) continue;
+    found.set(key, { harness:task.harness, tty:task.tty });
   }
-  for (const [id, tty] of found) if (!pidOnTty(tty, 'codex')) found.delete(id);
+  for (const [key, info] of found) {
+    const pid = pidOnTty(info.tty, cliProcessNames(info.harness));
+    if (!pid) found.delete(key);
+    else info.pid = pid;
+  }
   return found;
 }
-function withCodexTerminals(list) {
-  const terminals = codexTerminals();
+function withTrackedTerminals(list) {
+  const terminals = trackedTerminals();
   if (!terminals.size) return list;
   return list.map(session => {
-    const tty = session.harness === 'codex' && !session.tty && terminals.get(session.nativeId);
-    if (!tty) return session;
-    const screen = terminalState(tty, 'codex');
-    return { ...session, tty, liveState:screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file) };
+    const info = ['codex', 'antigravity'].includes(session.harness) && !session.tty && !session.agAppOnly && terminals.get(session.id);
+    if (!info) return session;
+    const { tty, pid } = info;
+    if (session.harness === 'codex') {
+      const screen = terminalState(tty, 'codex');
+      return { ...session, tty, liveState:screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file) };
+    }
+    const screen = terminalState(tty, 'antigravity');
+    const run = antigravityRunStatus(session.nativeId);
+    const dbState = antigravityLiveState({ agStatus:run.status || session.agStatus, updatedAt:run.updatedAt || session.updatedAt }, true);
+    const permissions = canSkipPermissions(pid) ? 'skip' : screen.mode || session.permissions || '';
+    return { ...session, tty, liveState:screen.asking ? 'asking' : dbState || (screen.active ? 'working' : 'open'), ...(permissions ? { permissions } : {}) };
   });
 }
-// A new Claude or Codex window can stop at a startup question (trust this folder, install an update, pick an option)
+// A new Claude, Codex or Antigravity window can stop at a startup question (trust this folder, onboarding, update, pick an option)
 // before it takes the message. Shed reads the window, keeps the task open while it waits, and tells the person once.
-const STARTUP_PROMPT = /trust|Update available|update now|Press enter|Enter to confirm|Esc to cancel|❯\s*1\.|›\s*1\.\s|Would you like|Do you want/i;
+const STARTUP_PROMPT = /trust|Update available|update now|Press enter|Enter to confirm|Esc to cancel|enter Confirm|enter Toggle|Terms of Service|Choose your color scheme|Allow .*\?|\(y\/n\)|\[y\/n\]|❯\s*1\.|›\s*1\.\s|Would you like|Do you want/i;
 const startupScreens = new Map(); // task id -> last background reading of its window
 function startupPrompt(task) {
   if (!task.tty || Date.now() - Date.parse(task.createdAt) < 12000) return '';
@@ -206,11 +253,47 @@ function refreshCodexTerminalTask(task) {
   if (age > 300000 && !startupPrompt(task)) return { status:'failed', undelivered:true, error:'Codex has not recorded this message after five minutes. Check the Terminal window on the Mac.' };
   return null;
 }
+function refreshAntigravityTerminalTask(task) {
+  const age = Date.now() - Date.parse(task.createdAt);
+  const procNames = cliProcessNames('antigravity');
+  const pid = pidOnTty(task.tty, procNames);
+  if (!task.nativeSessionId) {
+    const liveId = pid ? antigravityConversationForPid(pid) : '';
+    const found = liveId ? { id:liveId, file:antigravityCliTranscriptPath(liveId) } : findAntigravityTranscript(task);
+    if (!found) {
+      if (startupPrompt(task)) return null;
+      if (age > 120000) return { status:'failed', undelivered:true, error:pid ? 'Antigravity has not started this conversation after two minutes. Check the Terminal window on the Mac.' : 'Antigravity did not start in the new Terminal window. Check that window on the Mac.' };
+      return null;
+    }
+    task.waitingOn = '';
+    Object.assign(task, { nativeSessionId:found.id, sessionId:`antigravity:${found.id}`, transcriptFile:found.file || antigravityCliTranscriptPath(found.id) });
+  }
+  if (!task.transcriptFile && task.nativeSessionId) task.transcriptFile = antigravityCliTranscriptPath(task.nativeSessionId);
+  const progress = antigravityTerminalProgress(task);
+  const run = antigravityRunStatus(task.nativeSessionId);
+  const dbRunning = run.status === 'CASCADE_RUN_STATUS_RUNNING';
+  const dbWaiting = /WAITING/i.test(run.status || '');
+  const dbIdle = run.status === 'CASCADE_RUN_STATUS_IDLE' && (!run.updatedAt || !progress.foundAt || Date.parse(run.updatedAt) >= progress.foundAt - 2000);
+  if (progress.found) {
+    task.waitingOn = '';
+    const done = (progress.finalReply && !dbRunning && !dbWaiting) || (Boolean(progress.output) && dbIdle) || !pid;
+    return { status:done ? 'completed' : 'running', output:progress.output || task.output, error:'' };
+  }
+  if (!pid) return { status:'failed', undelivered:true, error:'The Antigravity window closed before it received this message.' };
+  if (startupPrompt(task)) return null;
+  if (task.permissions === 'terminal' && age > 8000 && !dbRunning && !dbWaiting && (task.submitRetries || 0) < 3 && Date.now() - (task.lastSubmitRetry || 0) > 6000) {
+    typeIntoTerminalAsync(task.tty, '', { agent:procNames }).catch(() => {});
+    task.submitRetries = (task.submitRetries || 0) + 1; task.lastSubmitRetry = Date.now();
+  }
+  if (age > 300000 && !startupPrompt(task)) return { status:'failed', undelivered:true, error:'Antigravity has not recorded this message after five minutes. Check the Terminal window on the Mac.' };
+  return null;
+}
 function refreshTerminalTasks() {
   const running = tasks.filter(task => task.delivery === 'terminal' && task.status === 'running' && !task.starting);
   if (!running.length) return;
   const live = claudeLiveSessions();
   let changed = false;
+  let sessionsChanged = false;
   for (const task of running) {
     if (task.harness === 'codex') {
       const before = JSON.stringify([task.transcriptFile, task.submitRetries]);
@@ -219,6 +302,17 @@ function refreshTerminalTasks() {
       if (result && (result.status !== task.status || (result.output ?? task.output) !== task.output || (result.error || '') !== task.error)) {
         Object.assign(task, { status:result.status, output:result.output ?? task.output, error:result.error || '', undelivered:Boolean(result.undelivered), updatedAt:new Date().toISOString() });
         changed = true;
+      }
+      continue;
+    }
+    if (task.harness === 'antigravity') {
+      const before = JSON.stringify([task.nativeSessionId, task.transcriptFile, task.submitRetries, task.waitingOn]);
+      const result = refreshAntigravityTerminalTask(task);
+      if (before !== JSON.stringify([task.nativeSessionId, task.transcriptFile, task.submitRetries, task.waitingOn])) { changed = true; sessionsChanged = true; }
+      if (result && (result.status !== task.status || (result.output ?? task.output) !== task.output || (result.error || '') !== task.error)) {
+        Object.assign(task, { status:result.status, output:result.output ?? task.output, error:result.error || '', undelivered:Boolean(result.undelivered), updatedAt:new Date().toISOString() });
+        changed = true;
+        if (result.status !== 'running') sessionsChanged = true;
       }
       continue;
     }
@@ -258,16 +352,19 @@ function refreshTerminalTasks() {
     }
   }
   if (changed) saveTasks();
+  if (sessionsChanged) { sessions(true); broadcast('sessions', {}); }
   for (const task of running) if (task.status === 'failed' && task.undelivered && task.handoffFrom) returnToOrigin(task);
 }
-// Live status: every 2 seconds Shed re-reads each live agent's state (Claude's status files, Codex's transcript, and a
-// background reading of each Terminal footer, none of which blocks) and pushes any change to open pages at once.
+// Live status: every 2 seconds Shed re-reads each live agent's state (Claude's status files, Codex's transcript,
+// Antigravity's DB status, and a background reading of each Terminal footer, none of which blocks) and pushes changes.
 const eventClients = new Set();
 function broadcast(event, data) {
   const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const res of eventClients) res.write(message);
+  for (const res of eventClients) {
+    try { res.write(message); } catch { eventClients.delete(res); }
+  }
 }
-setInterval(() => { for (const res of eventClients) res.write(': still here\n\n'); }, 20000).unref();
+setInterval(() => broadcast('ping', {}), 15000).unref();
 const announcedLive = new Set();
 let lastListedLive = new Set();
 function refreshLiveStatus() {
@@ -276,15 +373,24 @@ function refreshLiveStatus() {
   const now = new Map();
   for (const [id, info] of claudeLiveSessions()) now.set(`claude:${id}`, claudeLiveState(info));
   for (const session of list) {
-    if (session.harness !== 'codex' || session.liveState === 'history' || !session.tty) continue;
-    const screen = terminalState(session.tty, 'codex');
-    now.set(session.id, screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file));
+    if (session.liveState === 'history' || !session.tty) continue;
+    if (session.harness === 'codex') {
+      if (!pidOnTty(session.tty, 'codex')) continue;
+      const screen = terminalState(session.tty, 'codex');
+      now.set(session.id, screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file));
+    } else if (session.harness === 'antigravity') {
+      if (!pidOnTty(session.tty, cliProcessNames('antigravity'))) continue;
+      const screen = terminalState(session.tty, 'antigravity');
+      const run = antigravityRunStatus(session.nativeId);
+      const dbState = antigravityLiveState({ agStatus:run.status || session.agStatus, updatedAt:run.updatedAt || session.updatedAt }, true);
+      now.set(session.id, screen.asking ? 'asking' : dbState || (screen.active ? 'working' : 'open'));
+    }
   }
-  // A Claude session that started or closed changes the list itself, so pages fetch it again.
+  // A live session that started or closed changes the list itself, so pages fetch it again.
   // Each new one is announced once (its transcript may not exist yet, so it can stay missing from the list for a while).
   const appeared = [...now.keys()].filter(id => !byId.has(id) && !announcedLive.has(id));
   appeared.forEach(id => announcedLive.add(id));
-  const closed = list.some(s => s.harness === 'claude' && s.liveState !== 'history' && !now.has(s.id));
+  const closed = list.some(s => (s.harness === 'claude' || (['codex', 'antigravity'].includes(s.harness) && s.tty)) && s.liveState !== 'history' && !now.has(s.id));
   // A live session whose transcript has just appeared in the list is news for open pages too.
   const listedLive = new Set(list.filter(s => now.has(s.id)).map(s => s.id));
   const newlyListed = [...listedLive].some(id => !lastListedLive.has(id));
@@ -301,7 +407,7 @@ setInterval(() => { try { refreshLiveStatus(); } catch (error) { console.error(`
 // Runs whether or not anyone has Shed open: keeps task progress current and sends push notifications for
 // finished tasks and for agents that start waiting on a permission prompt.
 const seen = { tasks:null, asking:null, at:0 };
-const label = { claude:'Claude', codex:'Codex', gemini:'Gemini', pi:'Pi', opencode:'OpenCode' };
+const label = { claude:'Claude', codex:'Codex', gemini:'Gemini', pi:'Pi', opencode:'OpenCode', antigravity:'Antigravity' };
 const notifyPrefs = () => ({ finished:true, asking:true, ...(settings.notify || {}) });
 function firstLine(text) { return String(text || '').replace(/[#*`>_]/g, '').split('\n').map(l => l.trim()).find(Boolean)?.slice(0, 140) || ''; }
 async function watchAndNotify() {
@@ -349,14 +455,23 @@ const terminalModel = id => typeof id === 'string' && /^[\w.\-\[\]]{1,80}$/.test
 // Shared by sending and the drawer preview, so the preview shows exactly what a send would do.
 async function planTask(input) {
   let { route, cwd, healthyHarnesses, health } = await routeInput(input);
+  let modelSession = route.session;
   if (input.sessionId) {
     const origin = route.session;
+    modelSession = origin;
     const currentReady = healthyHarnesses.includes(origin.harness) && available[origin.harness];
     const followup = await decideFollowup(input.prompt, origin, { mode:input.followup || 'auto', availableHarnesses:healthyHarnesses.filter(name => available[name]), currentReady, currentDetail:health[origin.harness]?.detail });
     if (followup.handoff) {
       route = { ...followup, handoffFrom:origin.id };
       cwd = origin.cwd;
+      modelSession = null;
       input = { ...input, agentPrompt:handoffPrompt(origin, input.prompt), model:followup.source === 'selected' ? input.model : '' };
+    } else if (origin.harness === 'antigravity' && origin.agAppOnly) {
+      // Antigravity App trajectories live in ~/.gemini/antigravity, while `agy --conversation` only resumes
+      // CLI trajectories in ~/.gemini/antigravity-cli. Continue in a new CLI session with its recent context.
+      route = { session:null, harness:'antigravity', handoff:true, handoffFrom:origin.id, reason:'Continuing this Antigravity App conversation in a new Antigravity CLI session with its recent context', source:'selected' };
+      cwd = origin.cwd;
+      input = { ...input, agentPrompt:handoffPrompt(origin, input.prompt) };
     } else route = { ...followup, session:origin };
   }
   const selectedHarness = route.session?.harness || route.harness;
@@ -364,9 +479,9 @@ async function planTask(input) {
     ? { model:'', reason:'The open Codex session keeps its current model.', source:'session' }
     : selectedHarness === 'claude' && route.session?.tty && terminalModel(input.model)
     ? { model:input.model, reason:`Switches the open terminal to ${terminalModel(input.model).label || input.model} with /model, then types your message.`, source:'selected' }
-    : ['claude', 'codex'].includes(selectedHarness) && route.session?.tty
+    : ['claude', 'codex', 'antigravity'].includes(selectedHarness) && route.session?.tty
     ? { model:'', reason:'Typed into the open terminal, so the session keeps its own model and permissions.', source:'session' }
-    : await decideModel(input.prompt, selectedHarness, modelConfig(selectedHarness, settings.modelRouting), { override:input.model || '', session:route.session });
+    : await decideModel(input.prompt, selectedHarness, modelConfig(selectedHarness, settings.modelRouting), { override:input.model || '', session:modelSession });
   return { input, route, cwd, model };
 }
 
@@ -383,8 +498,8 @@ function autoWorkspace(prompt, preview) {
 }
 async function routeInput(input, preview = false) {
   const cachedHealth = harnessHealth();
-  const health = Object.keys(cachedHealth || {}).length ? cachedHealth : await refreshHarnessHealth();
-  if (Object.keys(cachedHealth || {}).length) refreshHarnessHealth().catch(() => {});
+  const health = Object.keys(cachedHealth || {}).length ? cachedHealth : await checkHealth();
+  if (Object.keys(cachedHealth || {}).length) checkHealth().catch(() => {});
   const healthyHarnesses = Object.entries(health).filter(([, status]) => status.state === 'ready').map(([name]) => name);
   if (input.harness && input.harness !== 'auto' && !healthyHarnesses.includes(input.harness)) throw new Error(health[input.harness]?.detail || `${input.harness} is not ready.`);
   const chosen = input.harness && input.harness !== 'auto';
@@ -400,7 +515,7 @@ async function routeInput(input, preview = false) {
   }
   // A new session with no project gets a folder of its own, named from the message, never Shed's own code folder.
   if (!requestedCwd && !input.sessionId && input.newSession) requestedCwd = autoWorkspace(input.prompt, preview);
-  const candidates = input.newSession ? [] : all.filter(s => s.liveState !== 'working' && (!requestedCwd || s.cwd === requestedCwd) && (s.harness !== 'gemini' || Boolean(s.cwd)) && (chosen ? s.harness === input.harness : pickable.includes(s.harness)));
+  const candidates = input.newSession ? [] : all.filter(s => s.liveState !== 'working' && !s.hidden && (!requestedCwd || s.cwd === requestedCwd) && (s.harness !== 'gemini' || Boolean(s.cwd)) && (chosen ? s.harness === input.harness : pickable.includes(s.harness)));
   const fallback = chosen ? input.harness : pickable[0];
   if (!fallback && !input.sessionId) throw new Error(healthyHarnesses.length ? 'Every ready harness is switched off for Laya. Pick one, or turn one back on in Settings.' : 'No coding harness is ready. Check the harness status in the sidebar.');
   // The task planner checks follow-up health and permits only explicit handoffs.
@@ -470,18 +585,42 @@ function cookies(req) {
 const SESSION_IDLE_MS = 30 * 24 * 3600 * 1000;
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
 const devices = () => (settings.devices ||= []);
-const pairingCodes = new Map(); // code -> expiry time; single use
+const pairingCodes = new Map(); // QR token -> expiry time; single use
+const shortPairingCodes = new Map(); // 6-digit code -> expiry time; single use
+const PAIRING_TTL_MS = 10 * 60 * 1000;
+function prunePairingCodes() {
+  const now = Date.now();
+  for (const [code, expires] of pairingCodes) if (expires < now) pairingCodes.delete(code);
+  for (const [code, expires] of shortPairingCodes) if (expires < now) shortPairingCodes.delete(code);
+}
 function newPairingCode() {
-  for (const [code, expires] of pairingCodes) if (expires < Date.now()) pairingCodes.delete(code);
+  prunePairingCodes();
   const code = crypto.randomBytes(18).toString('base64url');
-  pairingCodes.set(code, Date.now() + 10 * 60 * 1000);
+  pairingCodes.set(code, Date.now() + PAIRING_TTL_MS);
   return code;
 }
+function newShortPairingCode() {
+  prunePairingCodes();
+  const digits = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  shortPairingCodes.set(digits, Date.now() + PAIRING_TTL_MS);
+  return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+}
 function usePairingCode(code) {
-  if (typeof code !== 'string' || !pairingCodes.has(code)) return false;
-  const valid = pairingCodes.get(code) > Date.now();
-  pairingCodes.delete(code);
-  return valid;
+  if (typeof code !== 'string') return false;
+  const trimmed = code.trim();
+  if (!trimmed) return false;
+  if (pairingCodes.has(trimmed)) {
+    const valid = pairingCodes.get(trimmed) > Date.now();
+    pairingCodes.delete(trimmed);
+    return valid;
+  }
+  const digits = trimmed.replace(/[\s-]+/g, '');
+  if (/^\d{6}$/.test(digits) && shortPairingCodes.has(digits)) {
+    const valid = shortPairingCodes.get(digits) > Date.now();
+    shortPairingCodes.delete(digits);
+    return valid;
+  }
+  return false;
 }
 function deviceName(req) {
   const ua = String(req.headers['user-agent'] || '');
@@ -588,6 +727,11 @@ function endTarget(session) {
   }
   // Open in the Codex desktop app: no process of its own, so Shed asks the Codex app to stop the running turn.
   if (session.harness === 'codex' && !session.tty) return { codexThread:session.nativeId };
+  if (session.harness === 'antigravity' && session.tty) {
+    const command = cliProcessNames('antigravity');
+    const pid = pidOnTty(session.tty, command);
+    if (pid) return { pid, command };
+  }
   const task = tasks.find(t => t.sessionId === session.id && active.has(t.id));
   return task ? { task } : null;
 }
@@ -729,8 +873,8 @@ function queueCodexTask(task, session) {
 }
 
 // Sign-in runs each CLI's own login flow in a Terminal window on the Mac; the drawer mirrors it so it can be followed from a phone.
-const CONTROL_KEYS = ['\u0003', '\u001b[Z', '1', '2', '3', ''];
-const loginCommands = { codex:['codex', 'login'], claude:['claude', 'auth', 'login'], gemini:['gemini'], opencode:['opencode', 'auth', 'login'], pi:['pi'] };
+const CONTROL_KEYS = ['\u0003', '\u001b[Z', '1', '2', '3', 'y', 'n', ''];
+const loginCommands = { codex:['codex', 'login'], claude:['claude', 'auth', 'login'], gemini:['gemini'], opencode:['opencode', 'auth', 'login'], pi:['pi'], antigravity:['agy'] };
 const loginTerminals = new Map();
 // A terminal reading for the phone: the screen text plus, when the agent is asking, the options it offers.
 function terminalReading(tty, text) { return { tty, text, menu:parseMenu(text.split('\n').slice(-40).join('\n')) }; }
@@ -744,8 +888,8 @@ async function chooseOption(tty, input) {
   return { status:200 };
 }
 
-// Claude runs in a visible Terminal: typed into the tab that already holds the session, or a new window that resumes it.
-const QUESTION_ON_SCREEN = /Do you want to|Esc to cancel|Enter to confirm|❯\s*1\.|›\s*1\.\s|Would you like to|Press enter to confirm|trust this folder/i;
+// Claude, Codex and Antigravity run in a visible Terminal: typed into the tab that already holds the session, or a new window that resumes it.
+const QUESTION_ON_SCREEN = /Do you want to|Esc to cancel|Enter to confirm|enter Confirm|enter Toggle|Allow .*\?|\(y\/n\)|\[y\/n\]|Terms of Service|Choose your color scheme|❯\s*1\.|›\s*1\.\s|Would you like to|Press enter to confirm|trust this folder/i;
 // The request returns as soon as the task exists; typing into Terminal (about a second of AppleScript and a pause)
 // runs in the background, so sending feels instant and the server keeps answering other requests meanwhile.
 function startTerminalTask(task, route, modelDecision, cwd, agentPrompt, skipPermissions) {
@@ -755,14 +899,15 @@ function startTerminalTask(task, route, modelDecision, cwd, agentPrompt, skipPer
 }
 async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, skipPermissions) {
   const session = route.session;
-  const label = task.harness === 'codex' ? 'Codex' : 'Claude';
+  const harnessName = label[task.harness] || task.harness;
+  const procNames = cliProcessNames(task.harness);
   try {
     // Only type into a session's window while the agent is still running there; otherwise resume it in a new window.
-    if (session?.tty && agentInForeground(session.tty, task.harness)) {
+    if (session?.tty && agentInForeground(session.tty, procNames)) {
       Object.assign(task, { tty:session.tty });
       // Never type a message while the agent shows a question: the Return would pick whatever option is highlighted
-      // (for example "No, exit" on Claude's folder-trust question).
-      if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`${label} is waiting for an answer in its Terminal. Answer it from the Terminal tab first, then send your message again.`);
+      // (for example "No, exit" on a folder-trust question).
+      if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`${harnessName} is waiting for an answer in its Terminal. Answer it from the Terminal tab first, then send your message again.`);
       // A model picked in the drawer: Claude switches with /model first, and the message follows once it's done.
       if (task.harness === 'claude' && modelDecision.source === 'selected' && terminalModel(modelDecision.model)) {
         await typeIntoTerminalAsync(session.tty, `/model ${modelDecision.model}`, { prompt:true, agent:'claude' });
@@ -770,9 +915,10 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
         if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`Claude asked something after /model ${modelDecision.model}. Answer it from the Terminal tab, then send your message again.`);
       }
       // Where the transcript ends now: Shed looks for the message (and the reply) from here on.
-      task.transcriptOffset = transcriptSize(session.file);
-      await typeIntoTerminalAsync(session.tty, agentPrompt, { prompt:true, agent:task.harness });
-      Object.assign(task, { tty:session.tty, transcriptFile:session.file, [task.harness === 'codex' ? 'nativeSessionId' : 'claudeSessionId']:session.nativeId, permissions:'terminal', output:`Typed into the open Terminal tab. Waiting for ${label} to pick it up.` });
+      const transcriptFile = session.file || (task.harness === 'antigravity' ? antigravityCliTranscriptPath(session.nativeId) : '');
+      task.transcriptOffset = transcriptSize(transcriptFile);
+      await typeIntoTerminalAsync(session.tty, agentPrompt, { prompt:true, agent:procNames });
+      Object.assign(task, { tty:session.tty, transcriptFile, [task.harness === 'claude' ? 'claudeSessionId' : 'nativeSessionId']:session.nativeId, permissions:'terminal', output:`Typed into the open Terminal tab. Waiting for ${harnessName} to pick it up.` });
     } else if (task.harness === 'codex') {
       const promptDir = path.join(dataDir, 'prompts');
       fs.mkdirSync(promptDir, { recursive:true, mode:0o700 });
@@ -780,8 +926,21 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       fs.writeFileSync(promptFile, agentPrompt, { mode:0o600 });
       // --no-alt-screen keeps Codex's output in Terminal's scrollback, which is what the drawer's terminal view reads.
       const argv = ['codex', ...(session ? ['resume', session.nativeId] : []), '--no-alt-screen', ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-bypass-approvals-and-sandbox'] : [])];
+      trustShedWorkspace(task.harness, cwd);
       const tty = await openTerminalAsync(cwd, argv, promptFile);
       Object.assign(task, { tty, permissions:skipPermissions ? 'skip' : 'default', ...(session ? { transcriptFile:session.file, nativeSessionId:session.nativeId } : {}), output:`Opened a new Terminal window on the Mac (${tty.replace('/dev/', '')}).${skipPermissions ? '' : ' Codex will ask there before running commands; answer from the Terminal view.'}` });
+    } else if (task.harness === 'antigravity') {
+      const promptDir = path.join(dataDir, 'prompts');
+      fs.mkdirSync(promptDir, { recursive:true, mode:0o700 });
+      const promptFile = path.join(promptDir, `${task.id}.txt`);
+      fs.writeFileSync(promptFile, agentPrompt, { mode:0o600 });
+      const transcriptFile = session ? session.file || antigravityCliTranscriptPath(session.nativeId) : '';
+      if (session) task.transcriptOffset = transcriptSize(transcriptFile);
+      // altScreenMode:"never" keeps Antigravity's TUI in Terminal's scrollback for Shed's Terminal view, and -i keeps the session open after responding.
+      const argv = ['agy', ...(session ? ['--conversation', session.nativeId] : []), '--settings', '{"altScreenMode":"never"}', ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-skip-permissions'] : []), '-i'];
+      trustShedWorkspace(task.harness, cwd);
+      const tty = await openTerminalAsync(cwd, argv, promptFile);
+      Object.assign(task, { tty, permissions:skipPermissions ? 'skip' : 'default', ...(session ? { transcriptFile, nativeSessionId:session.nativeId } : {}), output:`Opened a new Terminal window on the Mac (${tty.replace('/dev/', '')}).${skipPermissions ? '' : ' Antigravity will ask there before running commands; answer from the Terminal view.'}` });
     } else {
       const promptDir = path.join(dataDir, 'prompts');
       fs.mkdirSync(promptDir, { recursive:true, mode:0o700 });
@@ -789,6 +948,7 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       fs.writeFileSync(promptFile, agentPrompt, { mode:0o600 });
       if (session) task.transcriptOffset = transcriptSize(session.file);
       const argv = ['claude', ...(session ? ['--resume', session.nativeId] : []), ...(modelDecision.model ? ['--model', modelDecision.model] : []), ...(skipPermissions ? ['--dangerously-skip-permissions'] : ['--allow-dangerously-skip-permissions'])];
+      trustShedWorkspace(task.harness, cwd);
       const tty = await openTerminalAsync(cwd, argv, promptFile);
       Object.assign(task, { tty, permissions:skipPermissions ? 'skip' : 'default', output:`Opened a new Terminal window on the Mac (${tty.replace('/dev/', '')}).${skipPermissions ? '' : ' Claude will ask there before using tools; answer from the Terminal view.'}` });
     }
@@ -824,72 +984,104 @@ function startTask(input, route, modelDecision, requestedCwd = '') {
     queueCodexTask(task, route.session);
     return task;
   }
-  if ((harness === 'claude' && process.env.LAYA_HEADLESS_CLAUDE !== '1') || (harness === 'codex' && process.env.LAYA_HEADLESS_CODEX !== '1')) {
+  if ((harness === 'claude' && process.env.LAYA_HEADLESS_CLAUDE !== '1') || (harness === 'codex' && process.env.LAYA_HEADLESS_CODEX !== '1') || (harness === 'antigravity' && process.env.LAYA_HEADLESS_ANTIGRAVITY !== '1')) {
     startTerminalTask(task, route, modelDecision, cwd, agentPrompt, Boolean(input.skipPermissions));
     return task;
   }
-  let command = harness;
-  let args;
+  let command = cliCommand(harness);
   const modelArgs = modelDecision.model ? ['--model', modelDecision.model] : [];
-  if (harness === 'codex') {
-    args = route.session ? ['exec', 'resume', '--json', '--skip-git-repo-check', ...modelArgs, route.session.nativeId, '-'] : ['exec', '--json', '--skip-git-repo-check', ...modelArgs, '-C', cwd, '-'];
-  } else if (harness === 'claude') {
-    args = ['-p', agentPrompt, '--output-format', 'stream-json', '--verbose', ...modelArgs, ...(route.session ? ['--resume', route.session.nativeId] : [])];
-  } else if (harness === 'gemini') {
-    args = ['-p', agentPrompt, '-o', 'stream-json', ...modelArgs, ...(route.session ? ['--resume', route.session.nativeId] : [])];
-  } else if (harness === 'pi') {
-    args = ['-p', '--mode', 'json', ...modelArgs, ...(route.session ? ['--session', route.session.file] : []), agentPrompt];
-  } else {
-    args = ['run', '--format', 'json', ...modelArgs, ...(route.session ? ['--session', route.session.nativeId] : []), agentPrompt];
-  }
-  const child = spawn(command, args, { cwd, env: { ...process.env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
-  active.set(task.id, child);
-  if (harness === 'codex') child.stdin.end(agentPrompt); else child.stdin.end();
-  let pending = '';
-  function acceptLine(line) {
-    let item;
-    try { item = JSON.parse(line); } catch { if (line.trim()) task.output += line + '\n'; return; }
-    if (item.type === 'thread.started' && item.thread_id) task.sessionId = `codex:${item.thread_id}`;
-    if (item.session_id && !task.sessionId) task.sessionId = `${harness}:${item.session_id}`;
-    if (item.sessionID && !task.sessionId) task.sessionId = `${harness}:${item.sessionID}`;
-    const message = item.type === 'item.completed' && item.item?.type === 'agent_message' ? item.item.text :
-      item.type === 'message' && (item.role === 'assistant' || item.message?.role === 'assistant') ? (item.content || item.message?.content) :
-      item.type === 'result' ? (item.result || item.content) :
-      item.type === 'message_end' && item.message?.role === 'assistant' ? item.message.content?.map?.(part => part.text || '').join(' ') :
-      item.type === 'text' ? item.part?.text : null;
-    if (message) task.output += (typeof message === 'string' ? message : JSON.stringify(message)) + '\n\n';
-    if (item.type === 'error') task.error += (item.message || JSON.stringify(item)) + '\n';
-    task.output = task.output.slice(-120000);
-    task.updatedAt = new Date().toISOString();
-  }
-  child.stdout.on('data', chunk => {
-    pending += chunk.toString();
-    const lines = pending.split('\n'); pending = lines.pop() || '';
-    for (const line of lines) acceptLine(line);
-    saveTasks();
-  });
-  child.stderr.on('data', chunk => {
-    task.error = (task.error + chunk.toString()).slice(-12000);
-    task.updatedAt = new Date().toISOString();
-    saveTasks();
-  });
-  child.on('error', err => { updateTask(task, { status: 'failed', error: err.message, updatedAt: new Date().toISOString() }); active.delete(task.id); });
-  child.on('close', code => {
-    if (pending.trim()) acceptLine(pending);
-    if (harness === 'codex' && route.session && task.status !== 'cancelling' && code !== 0 && /already has an active writer|thread-store conflict/i.test(task.error)) {
-      active.delete(task.id);
-      queueCodexTask(task, route.session);
-      return;
+  function buildArgs(resumeSession, promptText) {
+    if (harness === 'codex') return resumeSession ? ['exec', 'resume', '--json', '--skip-git-repo-check', ...modelArgs, resumeSession.nativeId, '-'] : ['exec', '--json', '--skip-git-repo-check', ...modelArgs, '-C', cwd, '-'];
+    if (harness === 'claude') return ['-p', promptText, '--output-format', 'stream-json', '--verbose', ...modelArgs, ...(resumeSession ? ['--resume', resumeSession.nativeId] : [])];
+    if (harness === 'gemini') return ['-p', promptText, '-o', 'stream-json', ...modelArgs, ...(resumeSession ? ['--resume', resumeSession.nativeId] : [])];
+    if (harness === 'pi') return ['-p', '--mode', 'json', ...modelArgs, ...(resumeSession ? ['--session', resumeSession.file] : []), promptText];
+    if (harness === 'antigravity') {
+      trustShedWorkspace('antigravity', cwd);
+      return ['-p', promptText, '--output-format', 'stream-json', ...modelArgs, ...(resumeSession ? ['--conversation', resumeSession.nativeId] : []), ...(input.skipPermissions ? ['--dangerously-skip-permissions'] : [])];
     }
-    updateTask(task, { status: task.status === 'cancelling' ? 'cancelled' : code === 0 ? 'completed' : 'failed', exitCode: code, updatedAt: new Date().toISOString() });
-    active.delete(task.id); sessions(true);
-  });
+    return ['run', '--format', 'json', ...modelArgs, ...(resumeSession ? ['--session', resumeSession.nativeId] : []), promptText];
+  }
+  function launch(resumeSession, promptText, retried = false) {
+    const args = buildArgs(resumeSession, promptText);
+    const child = spawn(command, args, { cwd, env: { ...process.env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    active.set(task.id, child);
+    if (harness === 'codex') child.stdin.end(promptText); else child.stdin.end();
+    let pending = '';
+    let agStreamed = '';
+    let agResultStatus = '';
+    function acceptLine(line) {
+      let item;
+      try { item = JSON.parse(line); } catch { if (line.trim()) task.output += line + '\n'; return; }
+      if (harness === 'antigravity') {
+        const cid = item.conversation_id || item.step_update?.conversation_id || item.result?.conversation_id;
+        if (cid && !task.sessionId) task.sessionId = `antigravity:${cid}`;
+        if (item.event === 'step_update' && item.step_update?.text_delta) {
+          agStreamed += item.step_update.text_delta;
+          task.output = agStreamed.slice(-120000);
+        } else if (item.event === 'result' && item.result) {
+          agResultStatus = String(item.result.status || '');
+          if (item.result.response) task.output = String(item.result.response).slice(-120000);
+          if (item.result.error) task.error = (task.error + item.result.error + '\n').slice(-12000);
+          else if (agResultStatus && agResultStatus !== 'SUCCESS' && !task.error) task.error = `Antigravity ended with status ${agResultStatus}.\n`;
+        } else if (!item.event) {
+          if (item.status) agResultStatus = String(item.status);
+          if (item.response) task.output = String(item.response).slice(-120000);
+          if (item.error) task.error = (task.error + item.error + '\n').slice(-12000);
+        }
+        task.updatedAt = new Date().toISOString();
+        return;
+      }
+      if (item.type === 'thread.started' && item.thread_id) task.sessionId = `codex:${item.thread_id}`;
+      if (item.session_id && !task.sessionId) task.sessionId = `${harness}:${item.session_id}`;
+      if (item.sessionID && !task.sessionId) task.sessionId = `${harness}:${item.sessionID}`;
+      const message = item.type === 'item.completed' && item.item?.type === 'agent_message' ? item.item.text :
+        item.type === 'message' && (item.role === 'assistant' || item.message?.role === 'assistant') ? (item.content || item.message?.content) :
+        item.type === 'result' ? (item.result || item.content) :
+        item.type === 'message_end' && item.message?.role === 'assistant' ? item.message.content?.map?.(part => part.text || '').join(' ') :
+        item.type === 'text' ? item.part?.text : null;
+      if (message) task.output += (typeof message === 'string' ? message : JSON.stringify(message)) + '\n\n';
+      if (item.type === 'error') task.error += (item.message || JSON.stringify(item)) + '\n';
+      task.output = task.output.slice(-120000);
+      task.updatedAt = new Date().toISOString();
+    }
+    child.stdout.on('data', chunk => {
+      pending += chunk.toString();
+      const lines = pending.split('\n'); pending = lines.pop() || '';
+      for (const line of lines) acceptLine(line);
+      saveTasks();
+    });
+    child.stderr.on('data', chunk => {
+      task.error = (task.error + chunk.toString()).slice(-12000);
+      task.updatedAt = new Date().toISOString();
+      saveTasks();
+    });
+    child.on('error', err => { updateTask(task, { status: 'failed', error: err.message, updatedAt: new Date().toISOString() }); active.delete(task.id); });
+    child.on('close', code => {
+      if (pending.trim()) acceptLine(pending);
+      if (harness === 'codex' && resumeSession && task.status !== 'cancelling' && code !== 0 && /already has an active writer|thread-store conflict/i.test(task.error)) {
+        active.delete(task.id);
+        queueCodexTask(task, resumeSession);
+        return;
+      }
+      if (harness === 'antigravity' && resumeSession && !retried && task.status !== 'cancelling' && code !== 0 && /trajectory not found/i.test(task.error)) {
+        active.delete(task.id);
+        updateTask(task, { sessionId:null, handoffFrom:resumeSession.id, routeReason:'Continuing this Antigravity conversation in a new CLI session with its recent context', output:'', error:'', updatedAt:new Date().toISOString() });
+        launch(null, handoffPrompt(resumeSession, input.prompt) + attachmentNote(attachments), true);
+        return;
+      }
+      const agFailed = harness === 'antigravity' && ['ERROR', 'INVALID'].includes(agResultStatus);
+      updateTask(task, { status: task.status === 'cancelling' ? 'cancelled' : code === 0 && !agFailed ? 'completed' : 'failed', exitCode: code, updatedAt: new Date().toISOString() });
+      active.delete(task.id); sessions(true);
+    });
+  }
+  launch(route.session, agentPrompt);
   return task;
 }
 
 // Who is asking and what this Mac offers: the first thing the app reads.
 function meInfo(req) {
-  return { ok:true, local:isLocalRequest(req), lanEnabled, pendingDevices:isLocalRequest(req) ? devices().filter(d => d.status === 'pending' && Date.now() - Date.parse(d.createdAt) < 86400000).map(d => publicDevice(d)) : [], phoneConnectedAt:settings.phoneConnectedAt || null, available, laya:layaStatus(), hostname:os.hostname(), phoneUrl:lanEnabled ? `http://${lanAddress()}:${port}` : '', remoteUrl:remoteUrl() };
+  const status = remoteStatus();
+  return { ok:true, local:isLocalRequest(req), lanEnabled, pendingDevices:isLocalRequest(req) ? devices().filter(d => d.status === 'pending' && Date.now() - Date.parse(d.createdAt) < 86400000).map(d => publicDevice(d)) : [], phoneConnectedAt:settings.phoneConnectedAt || null, available, laya:layaStatus(), hostname:os.hostname(), phoneUrl:lanEnabled ? `http://${lanAddress()}:${port}` : '', remoteUrl:status.url, remote:status };
 }
 // Static files are kept in memory with an ETag and ready-compressed copies (rebuilt when a file changes on disk), so a
 // phone that already has the app gets a 304 with no body, and one that doesn't gets a small download.
@@ -1026,6 +1218,7 @@ const server = http.createServer(async (req, res) => {
       const { device, key } = createDevice(req, local || paired ? 'approved' : 'pending');
       if (!local && !settings.phoneConnectedAt) { settings = { ...settings, phoneConnectedAt:new Date().toISOString() }; saveSettings(); }
       if (device.status === 'pending') notify({ title:'New device wants to use Shed', body:`${device.name} from ${device.lastIp}. Approve it on your Mac, or ignore this to keep it out.`, url:'/?view=settings', tag:`device-${device.id}` }).catch(() => {});
+      broadcast('devices', {});
       return send(res, device.status === 'approved' ? 200 : 202, { ok:true, status:device.status, device:publicDevice(device, device) }, { 'Set-Cookie':sessionCookie(req, key) });
     }
     // Lets a device that signed in with the password see whether the Mac has approved it yet.
@@ -1121,38 +1314,59 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { keys:shareKeys().map(publicShareKey) });
     }
     if (pathname === '/api/connect' && req.method === 'GET') {
-      const base = remoteUrl() || (lanEnabled ? `http://${lanAddress()}:${port}` : '');
-      if (!base) return send(res, 200, { url:'', secure:false, qr:'', phoneConnectedAt:settings.phoneConnectedAt || null });
-      // The QR code carries a one-time pairing code (10 minutes), so a phone that scans it is approved without a second step.
-      const url = isLocalRequest(req) ? `${base}/#pair=${newPairingCode()}` : base;
+      const status = remoteStatus();
+      const base = status.url || (lanEnabled ? `http://${lanAddress()}:${port}` : '');
+      if (!base) return send(res, 200, { url:'', link:'', secure:false, permanent:status.permanent, mode:status.mode, state:status.state, detail:status.detail, qr:'', shortCode:'', phoneConnectedAt:settings.phoneConnectedAt || null });
+      // The QR code and 6-digit code both approve one device immediately for 10 minutes (only minted on the Mac).
+      const local = isLocalRequest(req);
+      const url = local ? `${base}/#pair=${newPairingCode()}` : base;
+      const shortCode = local ? newShortPairingCode() : '';
       const svg = await QRCode.toString(url, { type:'svg', margin:1, errorCorrectionLevel:'M', color:{ dark:'#1e1c19', light:'#fffdf8' } });
-      return send(res, 200, { url, link:base, secure:Boolean(remoteUrl()), qr:svg, phoneConnectedAt:settings.phoneConnectedAt || null });
+      return send(res, 200, { url, link:base, secure:Boolean(status.url), permanent:status.permanent, mode:status.mode, state:status.state, detail:status.detail, qr:svg, shortCode, expiresInSec:600, phoneConnectedAt:settings.phoneConnectedAt || null });
     }
     if (pathname === '/api/bootstrap' && req.method === 'GET') {
       // Everything the app needs to open, in one round trip: who you are, sessions, tasks, harness health and models.
       // The list versions match what /api/sessions and /api/tasks give, so the next poll answers "same".
       refreshQueuedTasks(); syncExchanges();
       const sessionList = JSON.stringify({ sessions:sessions().map(publicSession) }), taskList = JSON.stringify({ tasks:tasks.slice(0, 60).map(taskSummary), exchanges:exchanges.all().slice(0, 40).map(exchangeSummary) });
-      const cached = harnessHealth(), health = Object.keys(cached || {}).length ? cached : await refreshHarnessHealth();
+      const cached = harnessHealth(), health = Object.keys(cached || {}).length ? cached : await checkHealth();
       return writeJson(res, 200, `{"me":${JSON.stringify(meInfo(req))},"sessions":${sessionList.slice(12, -1)},"sessionsV":"${versionOf(sessionList)}","tasks":${taskList.slice(9, taskList.indexOf(',"exchanges":'))},"exchanges":${taskList.slice(taskList.indexOf(',"exchanges":') + 13, -1)},"tasksV":"${versionOf(taskList)}","harnesses":${JSON.stringify(health)},"models":${JSON.stringify(Object.fromEntries(harnesses.map(harness => [harness, modelConfig(harness, settings.modelRouting)])))}}`);
     }
     if (pathname === '/api/me' && req.method === 'GET') return send(res, 200, meInfo(req));
-    // Shed Pro (a permanent address). Turning it on or off changes the address phones use, so only the Mac can do it.
-    if (pathname === '/api/pro' && req.method === 'GET') return send(res, 200, { ...pro.status(), canChange:isLocalRequest(req) });
-    if ((pathname === '/api/pro/activate' || pathname === '/api/pro/deactivate') && req.method === 'POST') {
-      if (!isLocalRequest(req)) return send(res, 403, { error:'Change Shed Pro on the Mac.' });
-      if (pathname === '/api/pro/deactivate') return send(res, 200, await pro.deactivate());
-      const input = await body(req);
-      return send(res, 200, await pro.activate(String(input.licenseKey || '').trim(), String(input.name || '').trim().toLowerCase()));
+    // Remote access (Tailscale, own Cloudflare Named Tunnel, Quick Tunnel, custom URL, or local only).
+    // Changing remote access alters how phones reach this Mac, so only the Mac itself can change it.
+    if (pathname === '/api/remote' && req.method === 'GET') {
+      const fresh = new URL(req.url, 'http://x').searchParams.get('fresh') === '1';
+      return send(res, 200, {
+        config: remote.publicConfig(),
+        status: remoteStatus(),
+        capabilities: { cloudflared:Boolean(findCloudflared()), tailscale:await probeTailscale({ fresh }) },
+        lanUrl: lanEnabled ? `http://${lanAddress()}:${port}` : '',
+        canChange: isLocalRequest(req),
+      });
     }
-    if (pathname === '/api/harness-health' && req.method === 'GET') return send(res, 200, { harnesses:await refreshHarnessHealth(new URL(req.url, 'http://x').searchParams.get('force') === '1') });
+    if (pathname === '/api/remote' && req.method === 'POST') {
+      if (!isLocalRequest(req)) return send(res, 403, { error:'Change remote access settings on the Mac.' });
+      const input = await body(req);
+      const config = remote.saveConfig(input);
+      const status = remoteStatus();
+      broadcast('remote', status);
+      return send(res, 200, {
+        config,
+        status,
+        capabilities: { cloudflared:Boolean(findCloudflared()), tailscale:await probeTailscale({ fresh:true }) },
+        lanUrl: lanEnabled ? `http://${lanAddress()}:${port}` : '',
+        canChange: true,
+      });
+    }
+    if (pathname === '/api/harness-health' && req.method === 'GET') return send(res, 200, { harnesses:await checkHealth(new URL(req.url, 'http://x').searchParams.get('force') === '1') });
     if (pathname === '/api/settings' && req.method === 'GET') return send(res, 200, { laya:layaStatus(), local:true });
     if (pathname === '/api/laya/test' && req.method === 'POST') return send(res, 200, await probeLaya());
     if (pathname === '/api/models' && req.method === 'GET') return send(res, 200, { configs:Object.fromEntries(harnesses.map(harness => [harness, modelConfig(harness, settings.modelRouting)])) });
     if (pathname === '/api/models' && req.method === 'POST') {
       const input = await body(req);
       const validated = validateModelConfig(input.harness, input);
-      settings = { ...settings, modelRouting:{ ...(settings.modelRouting || {}), [input.harness]:validated } };
+      settings = { ...settings, modelRouting:{ ...(settings.modelRouting || {}), [input.harness]:{ ...validated, seen:offeredModels(input.harness) } } };
       fs.writeFileSync(settingsFile, JSON.stringify(settings), { mode:0o600 });
       fs.chmodSync(settingsFile, 0o600);
       return send(res, 200, { harness:input.harness, config:validated });
@@ -1176,21 +1390,30 @@ const server = http.createServer(async (req, res) => {
         device.status = 'approved'; device.approvedAt = new Date().toISOString();
       } else settings = { ...settings, devices:devices().filter(d => d.id !== device.id) };
       saveSettings();
+      broadcast('devices', {});
       return send(res, 200, { ok:true });
     }
     if (pathname === '/api/devices/revoke-others' && req.method === 'POST') {
       const current = deviceFor(req);
       settings = { ...settings, devices:devices().filter(d => d.id === current?.id) }; saveSettings();
+      broadcast('devices', {});
       return send(res, 200, { ok:true });
     }
     if (pathname === '/api/events' && req.method === 'GET') {
       res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type':'text/event-stream; charset=utf-8', 'Cache-Control':'no-store', 'Connection':'keep-alive', 'X-Accel-Buffering':'no' });
-      res.write('retry: 3000\n\n');
+      res.write('retry: 3000\n: connected\n\n');
+      res.flushHeaders?.();
       eventClients.add(res);
       req.on('close', () => eventClients.delete(res));
       return;
     }
     if (pathname === '/api/sessions' && req.method === 'GET') return sendVersioned(req, res, { sessions: sessions().map(publicSession) });
+    if (pathname === '/api/sessions/hide' && req.method === 'POST') {
+      const input = await body(req);
+      if (!Array.isArray(input.ids) || input.ids.length > 2000 || !input.ids.every(id => typeof id === 'string')) throw new Error('Send the sessions to clear as a list.');
+      const list = hideSessions(input.ids, input.hidden !== false);
+      return send(res, 200, { hidden:list.filter(s => s.hidden).length });
+    }
     if (pathname === '/api/push' && req.method === 'GET') {
       const endpoint = new URL(req.url, 'http://x').searchParams.get('endpoint') || '';
       return send(res, 200, { publicKey:pushPublicKey(), subscribed:endpoint ? isSubscribed(endpoint) : false, devices:pushCount(), prefs:notifyPrefs() });
@@ -1272,7 +1495,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST') {
         const input = await body(req);
-        if (!agentInForeground(tty, [loginCommands[name][0], 'node'])) return send(res, 409, { error:'The sign-in has finished in that window, so Shed will not type into it.' });
+        if (!agentInForeground(tty, [...cliProcessNames(name), 'node'])) return send(res, 409, { error:'The sign-in has finished in that window, so Shed will not type into it.' });
         if (input.option !== undefined) { const result = await chooseOption(tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
         if (typeof input.text !== 'string' || input.text.length > 4000) return send(res, 400, { error:'Send up to 4,000 characters.' });
         await typeIntoTerminalAsync(tty, input.text);
@@ -1290,7 +1513,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST') {
         const input = await body(req);
-        if (!agentInForeground(task.tty, [task.harness, 'node'])) return send(res, 409, { error:`${task.harness} is no longer running in that Terminal window.` });
+        if (!agentInForeground(task.tty, [...cliProcessNames(task.harness), 'node'])) return send(res, 409, { error:`${task.harness} is no longer running in that Terminal window.` });
         if (input.option !== undefined) { const result = await chooseOption(task.tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
         if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here.' });
         await typeIntoTerminalAsync(task.tty, input.text);
@@ -1312,7 +1535,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST') {
         const input = await body(req);
         // Only the on-screen control keys or a listed option, and only while the agent is the foreground program: never free text into a shell.
-        if (!agentInForeground(session.tty, session.harness)) return send(res, 409, { error:`${session.harness} is no longer running in that Terminal tab.` });
+        if (!agentInForeground(session.tty, cliProcessNames(session.harness))) return send(res, 409, { error:`${session.harness} is no longer running in that Terminal tab.` });
         if (input.option !== undefined) { const result = await chooseOption(session.tty, input); return send(res, result.status, result.error ? { error:result.error } : { ok:true }); }
         if (!CONTROL_KEYS.includes(input.text)) return send(res, 400, { error:'Only the terminal control keys can be sent here. Send messages from the message box.' });
         await typeIntoTerminalAsync(session.tty, input.text);
@@ -1388,7 +1611,7 @@ const server = http.createServer(async (req, res) => {
       const { route, cwd } = await routeInput(input, true);
       const selectedHarness = route.session?.harness || route.harness;
       const model = await decideModel(input.prompt, selectedHarness, modelConfig(selectedHarness, settings.modelRouting), { preview:true, override:input.model || '', session:route.session });
-      const ranked = rankSessions(input.prompt, sessions().filter(s => (!cwd || s.cwd === cwd) && (s.harness !== 'gemini' || Boolean(s.cwd)) && (input.harness && input.harness !== 'auto' ? s.harness === input.harness : harnessHealth()[s.harness]?.state === 'ready')), input.harness || 'auto').slice(0, 3);
+      const ranked = rankSessions(input.prompt, sessions().filter(s => !s.hidden && (!cwd || s.cwd === cwd) && (s.harness !== 'gemini' || Boolean(s.cwd)) && (input.harness && input.harness !== 'auto' ? s.harness === input.harness : harnessHealth()[s.harness]?.state === 'ready')), input.harness || 'auto').slice(0, 3);
       return send(res, 200, { route: { session: route.session && publicSession(route.session), harness:selectedHarness, reason: route.reason, confidence: route.confidence, source: 'local preview', model:model.model, modelReason:model.reason }, suggestions: ranked.map(x => ({ session: publicSession(x.session), score: x.score, reason: x.reason })) });
     }
     if (pathname === '/api/followup-preview' && req.method === 'POST') {
@@ -1426,10 +1649,10 @@ const server = http.createServer(async (req, res) => {
       if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 20000) return send(res, 400, { error: 'Prompt must be between 1 and 20,000 characters.' });
       let { input:planned, route, cwd, model } = await planTask(input);
       input = planned;
-      // A new session in a git project works on a branch of its own, in its own checkout.
-      const ownBranch = !route.session && cwd && input.ownBranch !== false && settings.ownBranch !== false ? await sessionWorktree(cwd, input.prompt) : null;
+      // A new session in a git project works on a branch of its own, in its own checkout (continuations/handoffs stay in the original folder).
+      const ownBranch = !route.session && !route.handoffFrom && cwd && input.ownBranch !== false && settings.ownBranch !== false ? await sessionWorktree(cwd, input.prompt) : null;
       if (ownBranch) cwd = ownBranch.path;
-      if (route.session?.liveState === 'working' && !['codex', 'claude'].includes(route.session.harness)) return send(res, 409, { error: 'This desktop session is still working. Wait for it to finish before sending a follow-up.' });
+      if (route.session?.liveState === 'working' && !['codex', 'claude'].includes(route.session.harness) && !(route.session.harness === 'antigravity' && route.session.tty)) return send(res, 409, { error: 'This desktop session is still working. Wait for it to finish before sending a follow-up.' });
       if (route.session && [...active.values()].some(child => child.layaSessionId === route.session.id)) return send(res, 409, { error: 'This session is already running a task.' });
       const task = startTask(input, route, model, cwd);
       if (ownBranch) { Object.assign(task, { branch:ownBranch.branch, project:ownBranch.project }); saveTasks(); }
@@ -1447,9 +1670,10 @@ const server = http.createServer(async (req, res) => {
       if (task && child) { updateTask(task, { status: 'cancelling' }); child.kill('SIGTERM'); return send(res, 200, { task }); }
       // A task running in a Terminal window: end the agent in that window.
       if (task?.delivery === 'terminal' && task.tty && ['running', 'cancelling'].includes(task.status)) {
-        const pid = pidOnTty(task.tty, task.harness);
+        const command = cliProcessNames(task.harness);
+        const pid = pidOnTty(task.tty, command);
         const thread = task.harness === 'codex' && task.sessionId?.startsWith('codex:') ? task.sessionId.slice('codex:'.length) : '';
-        const result = pid ? await endAgent({ pid, command:task.harness, codexThread:thread }) : { stopped:true };
+        const result = pid ? await endAgent({ pid, command, codexThread:thread }) : { stopped:true };
         if (!result.stopped) return send(res, 409, { error:`${label[task.harness] || task.harness} did not stop. Close its Terminal window on the Mac.` });
         updateTask(task, { status:'cancelled', error:'Cancelled from Shed.', updatedAt:new Date().toISOString() });
         if (task.sessionId) cancelSessionTasks(task.sessionId, 'Session ended from Shed.');
@@ -1469,7 +1693,7 @@ server.listen(port, host, () => {
   console.log('Sign in with the password set from the Mac browser.\n');
   console.log(`Harnesses: ${Object.entries(available).map(([name, yes]) => `${name} ${yes ? 'ready' : 'view only'}`).join(' · ')}`);
   if (process.env.LAYA_PRELOAD !== '0') getLaya().then(() => console.log('\nLaya local decision model is ready.')).catch(error => console.error(`\nLaya preload failed: ${error.message}`));
-  refreshHarnessHealth().catch(error => console.error(`Harness health check failed: ${error.message}`));
+  checkHealth().catch(error => console.error(`Harness health check failed: ${error.message}`));
   // Warm-up, so no phone request pays a first-time cost: the app's files compressed, the Terminal helper running,
   // and the git root of every open session's folder known.
   setImmediate(() => {
@@ -1477,10 +1701,13 @@ server.listen(port, host, () => {
     if (process.env.SHED_TERMINAL_WORKER !== '0' && process.platform === 'darwin') readTerminalAsync('/dev/ttys-warmup', 1).catch(() => {});
     for (const session of sessions().filter(s => s.liveState !== 'history' && s.cwd)) repoRoot(session.cwd).catch(() => {});
   });
-  setInterval(() => refreshHarnessHealth().catch(error => console.error(`Harness health check failed: ${error.message}`)), 60000).unref();
+  setInterval(() => checkHealth().catch(error => console.error(`Harness health check failed: ${error.message}`)), 60000).unref();
   watchAndNotify();
   setInterval(() => { sessions(true); watchAndNotify(); }, 10000).unref();
-  pro.check();
-  setInterval(() => pro.check(), 3600000).unref();
+  let lastRemoteKey = JSON.stringify(remoteStatus());
+  setInterval(() => {
+    const status = remoteStatus(), key = JSON.stringify(status);
+    if (key !== lastRemoteKey) { lastRemoteKey = key; broadcast('remote', status); }
+  }, 3000).unref();
   setInterval(() => autoCloseIdle().catch(error => console.error(`Auto-close failed: ${error.message}`)), 600000).unref();
 });

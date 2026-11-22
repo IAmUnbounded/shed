@@ -6,7 +6,7 @@ import path from 'node:path';
 export const MAX_DEPTH = 3;
 export const HOURLY_LIMIT = 20;
 const KEEP = 200;
-const label = { claude:'Claude', codex:'Codex', gemini:'Gemini', pi:'Pi', opencode:'OpenCode' };
+const label = { claude:'Claude', codex:'Codex', gemini:'Gemini', pi:'Pi', opencode:'OpenCode', antigravity:'Antigravity' };
 const project = cwd => cwd ? path.basename(cwd) : 'a project';
 export const describe = session => `${label[session.harness] || session.harness} session working on ${project(session.cwd)} ("${String(session.title || '').slice(0, 80)}")`;
 

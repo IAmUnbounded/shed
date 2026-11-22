@@ -1,14 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { claudeLiveSessions, ttyOf, readTerminalAsync } from './terminal.js';
+import { claudeLiveSessions, ttyOf, readTerminalAsync, canSkipPermissions } from './terminal.js';
 
 // Approval prompts and menus end with these lines; a session showing one is waiting on the user.
 const askingPatterns = {
   claude:/Do you want to|Esc to cancel|Enter to confirm|❯\s*1\./,
   codex:/Would you like to|Allow .*\?|Press enter to confirm|esc to cancel|[›❯]\s*1\.\s/i,
+  antigravity:/Do you want to|Allow .*\?|trust this|Proceed\?|\[y\/n\]|\(y\/n\)|enter Confirm|enter Toggle|Esc to cancel|Enter to confirm|Terms of Service|Choose your color scheme|[›❯]\s*1\.\s/i,
 };
-// Mid-turn, both CLIs show "esc to interrupt" in their footer, even while waiting on their own tools or background work.
+// Mid-turn, CLIs show "esc to interrupt" in their footer, even while waiting on their own tools or background work.
 const activePattern = /esc to interrupt|Working \(/i;
 export const activeOnScreen = screen => activePattern.test(screen || '');
 // Claude's footer names its permission mode (Shift+Tab changes it mid-session); with no mode named it asks first.
@@ -21,6 +22,13 @@ export function footerMode(screen) {
   if (/plan mode on/i.test(text)) return 'plan';
   return /[─━]{10,}\s*\n\s*❯/.test(text) && /\n\s*❯[^\n]*\n\s*[─━]{10,}/.test(text) ? 'ask' : '';
 }
+export function antigravityFooterMode(screen) {
+  const tail = String(screen || '').split('\n').map(l => l.trim()).filter(Boolean).slice(-4).join('\n');
+  if (/(?:^|\s)plan\s*·/i.test(tail)) return 'plan';
+  if (/(?:^|\s)accept-edits\s*·/i.test(tail)) return 'edits';
+  if (/(?:^|\s)auto\s*·/i.test(tail)) return 'auto';
+  return '';
+}
 // Reading a Terminal window takes about 0.3 seconds. Readings are refreshed in the background (at most every
 // 3 seconds per window) and the last one is returned straight away, so session discovery never waits on Terminal.
 const screenCache = new Map();
@@ -32,7 +40,7 @@ export function terminalState(tty, harness) {
   if (!entry.pending && Date.now() - entry.at > 3000) {
     entry.pending = true;
     readTerminalAsync(tty, 14)
-      .then(screen => { entry.state = { asking:askingPatterns[harness].test(screen || ''), active:activePattern.test(screen || ''), mode:harness === 'claude' ? footerMode(screen) : '' }; })
+      .then(screen => { entry.state = { asking:askingPatterns[harness].test(screen || ''), active:activePattern.test(screen || ''), mode:harness === 'claude' ? footerMode(screen) : harness === 'antigravity' ? antigravityFooterMode(screen) : '' }; })
       .catch(() => {})
       .finally(() => { entry.at = Date.now(); entry.pending = false; });
   }
@@ -48,7 +56,49 @@ export function claudeLiveState(info) {
   return info.status === 'busy' || screen.active ? 'working' : 'open';
 }
 
-const names = new Set(['codex', 'claude', 'gemini', 'pi', 'opencode']);
+const processHarness = { codex:'codex', claude:'claude', gemini:'gemini', pi:'pi', opencode:'opencode', agy:'antigravity', antigravity:'antigravity' };
+
+export function antigravityLiveState(session, running, now = Date.now()) {
+  if (!running || !session?.agStatus) return '';
+  if (now - Date.parse(session.updatedAt) > 30 * 60 * 1000) return '';
+  if (/WAITING/i.test(session.agStatus)) return 'asking';
+  if (session.agStatus === 'CASCADE_RUN_STATUS_RUNNING') return 'working';
+  return '';
+}
+
+// Antigravity CLI keeps open ~/.gemini/antigravity-cli/presence/<id>.lock and conversations/<id>.db (not transcript.jsonl).
+export function antigravityLivePids(files, processes = null) {
+  const best = new Map();
+  for (const [filePath, pid] of files) {
+    if (processes && processes.get(pid) !== 'antigravity') continue;
+    const match = filePath.match(/[/\\]antigravity-cli[/\\](presence|conversations|brain)[/\\]([^/\\]+)$/);
+    if (!match) continue;
+    let id = '', priority = 0;
+    if (match[1] === 'presence' && match[2].endsWith('.lock')) { id = match[2].slice(0, -5); priority = 3; }
+    else if (match[1] === 'conversations' && match[2].endsWith('.db')) { id = match[2].slice(0, -3); priority = 2; }
+    else if (match[1] === 'brain') { id = match[2]; priority = 1; }
+    if (!id) continue;
+    const prev = best.get(id);
+    if (!prev || priority > prev.priority) best.set(id, { pid, priority });
+  }
+  return new Map([...best].map(([id, info]) => [id, info.pid]));
+}
+
+export function antigravityConversationForPid(pid) {
+  if (!pid) return '';
+  const files = openFiles([pid]);
+  let chosen = '', bestPriority = 0;
+  for (const [filePath] of files) {
+    const match = filePath.match(/[/\\]antigravity-cli[/\\](presence|conversations|brain)[/\\]([^/\\]+)$/);
+    if (!match) continue;
+    let id = '', priority = 0;
+    if (match[1] === 'presence' && match[2].endsWith('.lock')) { id = match[2].slice(0, -5); priority = 3; }
+    else if (match[1] === 'conversations' && match[2].endsWith('.db')) { id = match[2].slice(0, -3); priority = 2; }
+    else if (match[1] === 'brain') { id = match[2]; priority = 1; }
+    if (id && priority > bestPriority) { chosen = id; bestPriority = priority; }
+  }
+  return chosen;
+}
 
 export function parseOpenFiles(output) {
   const files = new Map();
@@ -67,8 +117,8 @@ function agentPids() {
   for (const line of result.stdout.split('\n')) {
     const match = line.trim().match(/^(\d+)\s+(.+)$/);
     if (!match) continue;
-    const name = path.basename(match[2]).toLowerCase();
-    if (names.has(name)) processes.set(Number(match[1]), name);
+    const harness = processHarness[path.basename(match[2]).toLowerCase()];
+    if (harness) processes.set(Number(match[1]), harness);
   }
   return processes;
 }
@@ -126,20 +176,40 @@ export function liveSessionStates(sessions) {
   const files = openFiles([...processes.keys()]);
   const statuses = opencodeStatuses(processes);
   const claude = claudeLiveSessions();
+  const agPids = antigravityLivePids(files, processes);
+  const hasAntigravity = [...processes.values()].includes('antigravity');
   const states = new Map();
   for (const session of sessions) {
     const pid = session.file && files.get(session.file);
     const claudeLive = session.harness === 'claude' && claude.get(session.nativeId);
+    const agPid = session.harness === 'antigravity' && !session.agAppOnly ? agPids.get(session.nativeId) : null;
     if (claudeLive) {
       const mode = terminalState(claudeLive.tty, 'claude').mode;
       states.set(session.id, { liveState:claudeLiveState(claudeLive), livePid:claudeLive.pid, tty:claudeLive.tty, ...(mode ? { permissions:mode } : {}) });
+    } else if (agPid) {
+      const tty = ttyOf(agPid);
+      const dbState = antigravityLiveState(session, true);
+      if (tty) {
+        const screen = terminalState(tty, 'antigravity');
+        const liveState = screen.asking ? 'asking' : dbState || (screen.active ? 'working' : 'open');
+        const permissions = canSkipPermissions(agPid) ? 'skip' : screen.mode || '';
+        states.set(session.id, { liveState, livePid:agPid, tty, ...(permissions ? { permissions } : {}) });
+      } else {
+        states.set(session.id, { liveState:dbState || 'working', livePid:agPid, tty:'' });
+      }
     } else if (pid && processes.get(pid) === session.harness) {
       const tty = ttyOf(pid);
       const screen = session.harness === 'codex' ? terminalState(tty, 'codex') : null;
-      states.set(session.id, { liveState:session.harness === 'codex' ? (screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file)) : Date.now() - Date.parse(session.updatedAt) < 90000 ? 'working' : 'open', livePid:pid, tty });
+      const liveState = session.harness === 'codex' ? (screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file))
+        : session.harness === 'antigravity' ? (antigravityLiveState(session, true) || (Date.now() - Date.parse(session.updatedAt) < 90000 ? 'working' : 'open'))
+        : Date.now() - Date.parse(session.updatedAt) < 90000 ? 'working' : 'open';
+      states.set(session.id, { liveState, livePid:pid, tty });
     } else if (session.harness === 'opencode' && statuses.has(session.nativeId)) {
       const status = statuses.get(session.nativeId);
       states.set(session.id, { liveState:status?.type === 'busy' ? 'working' : 'open' });
+    } else if (session.harness === 'antigravity') {
+      const liveState = antigravityLiveState(session, hasAntigravity);
+      if (liveState) states.set(session.id, { liveState });
     }
   }
   return states;
