@@ -44,7 +44,7 @@ test('discovers a desktop session and resumes it through the task API', async ()
   fs.writeFileSync(opencode, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'fixture'; exit 0; fi\nif [ "$1" = "auth" ]; then echo '0 credentials'; exit 0; fi\nif [ "$1" = "session" ]; then echo '[{"id":"oc-fixture","title":"OpenCode research","directory":"${project}","time":{"updated":1780000000000}}]'; elif [ "$1" = "export" ]; then echo '{"messages":[]}'; fi\n`);
   fs.chmodSync(opencode, 0o755);
   const port = await freePort(), token = 'integration-secret';
-  const child = spawn(process.execPath, ['server/index.js'], { cwd:path.resolve('.'), env:{ ...process.env, HOME:home, PATH:`${bin}:/usr/bin:/bin`, LAYA_DATA_DIR:path.join(dir, 'data'), JEV_FAKE_ARGS:path.join(dir, 'args'), JEV_FAKE_QUEUE_ARGS:path.join(dir, 'queue-args'), JEV_FAKE_CONFLICT:path.join(dir, 'conflict'), LAYA_TOKEN:token, LAYA_PRELOAD:'0', LAYA_HEADLESS_CLAUDE:'1', LAYA_HEADLESS_CODEX:'1', SHED_LAN:'1', HOST:'127.0.0.1', PORT:String(port) }, stdio:'ignore' });
+  const child = spawn(process.execPath, ['server/index.js'], { cwd:path.resolve('.'), env:{ ...process.env, HOME:home, CLAUDE_CONFIG_DIR:path.join(home, '.claude'), PATH:`${bin}:/usr/bin:/bin`, LAYA_DATA_DIR:path.join(dir, 'data'), JEV_FAKE_ARGS:path.join(dir, 'args'), JEV_FAKE_QUEUE_ARGS:path.join(dir, 'queue-args'), JEV_FAKE_CONFLICT:path.join(dir, 'conflict'), LAYA_TOKEN:token, LAYA_PRELOAD:'0', LAYA_HEADLESS_CLAUDE:'1', LAYA_HEADLESS_CODEX:'1', SHED_LAN:'1', HOST:'127.0.0.1', PORT:String(port) }, stdio:'ignore' });
   try {
     const base = `http://127.0.0.1:${port}`;
     await waitFor(`${base}/api/me`);

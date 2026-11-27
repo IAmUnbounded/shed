@@ -7,7 +7,7 @@ import { liveSessionStates } from './live.js';
 const home = os.homedir();
 const roots = {
   codex: path.join(home, '.codex', 'sessions'),
-  claude: path.join(home, '.claude', 'projects'),
+  claude: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'), 'projects'),
   gemini: path.join(home, '.gemini', 'tmp'),
   pi: path.join(home, '.pi', 'agent', 'sessions'),
 };
@@ -113,9 +113,15 @@ function claudeRecord(file) {
   const first = lines.find(x => x.type === 'user' && !x.isSidechain && isUsefulPrompt(contentText(x.message?.content)));
   const title = clean(contentText(first?.message?.content));
   const tail = sliceFile(file, 128 * 1024, true);
-  const recent = jsonLines(tail).filter(x => x.type === 'user' && !x.isSidechain).map(x => contentText(x.message?.content)).filter(isUsefulPrompt);
+  const tailLines = jsonLines(tail);
+  const recent = tailLines.filter(x => x.type === 'user' && !x.isSidechain).map(x => contentText(x.message?.content)).filter(isUsefulPrompt);
   const id = first?.sessionId || path.basename(file, '.jsonl');
-  return { id: `claude:${id}`, nativeId: id, harness: 'claude', title: title || 'Untitled Claude session', lastPrompt: clean(recent.at(-1), 260), cwd: first?.cwd || '', currentModel: lastModel(tail), permissions: claudePermissions(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop' };
+  // Long sessions can fill the first 256 KB with metadata and file snapshots, leaving no user message there.
+  // Fall back to the saved session name and to the cwd of the latest entries, so the session is not hidden as untitled.
+  const named = [...lines, ...tailLines].filter(x => x.customTitle || x.aiTitle || x.agentName).at(-1);
+  const savedTitle = clean(named?.customTitle || named?.aiTitle || named?.agentName || '');
+  const cwd = first?.cwd || tailLines.findLast(x => x.cwd)?.cwd || '';
+  return { id: `claude:${id}`, nativeId: id, harness: 'claude', title: title || savedTitle || 'Untitled Claude session', lastPrompt: clean(recent.at(-1), 260), cwd,currentModel: lastModel(tail), permissions: claudePermissions(tail), updatedAt: stat.mtime.toISOString(), file, source: 'desktop' };
 }
 
 function geminiRecord(file) {
