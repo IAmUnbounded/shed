@@ -6,7 +6,7 @@ import { terminalCall } from './terminal-worker.js';
 
 // Claude Code writes ~/.claude/sessions/<pid>.json for each running interactive session, with its session ID and busy/idle status.
 export function claudeLiveSessions() {
-  const dir = path.join(os.homedir(), '.claude', 'sessions');
+  const dir = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'sessions');
   const live = new Map();
   let names = [];
   try { names = fs.readdirSync(dir).filter(name => /^\d+\.json$/.test(name)); } catch { return live; }

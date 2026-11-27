@@ -64,7 +64,7 @@ test('everything a phone does stays inside its latency budget', async t => {
   const fx = fixture();
   const port = await freePort(), token = 'latency-secret', base = `http://127.0.0.1:${port}`;
   const started = performance.now();
-  const child = spawn(process.execPath, ['server/index.js'], { cwd:path.resolve('.'), env:{ ...process.env, HOME:fx.home, PATH:`${fx.bin}:/usr/bin:/bin`, LAYA_DATA_DIR:path.join(fx.dir, 'data'), LAYA_TOKEN:token, LAYA_PRELOAD:'0', LAYA_HEADLESS_CLAUDE:'1', LAYA_HEADLESS_CODEX:'1', SHED_LAN:'1', SHED_TERMINAL_WORKER:'0', HOST:'127.0.0.1', PORT:String(port) }, stdio:'ignore' });
+  const child = spawn(process.execPath, ['server/index.js'], { cwd:path.resolve('.'), env:{ ...process.env, HOME:fx.home, CLAUDE_CONFIG_DIR:path.join(fx.home, '.claude'), PATH:`${fx.bin}:/usr/bin:/bin`, LAYA_DATA_DIR:path.join(fx.dir, 'data'), LAYA_TOKEN:token, LAYA_PRELOAD:'0', LAYA_HEADLESS_CLAUDE:'1', LAYA_HEADLESS_CODEX:'1', SHED_LAN:'1', SHED_TERMINAL_WORKER:'0', HOST:'127.0.0.1', PORT:String(port) }, stdio:'ignore' });
   const headers = { Authorization:`Bearer ${token}` };
   const results = [];
   try {
