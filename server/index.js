@@ -18,7 +18,11 @@ import { harnesses, cliCommand, cliProcessNames, modelConfig, validateModelConfi
 import { harnessHealth, refreshHarnessHealth } from './health.js';
 import { initPush, pushPublicKey, subscribe, unsubscribe, notify, isSubscribed, pushCount } from './notify.js';
 import { listArtifacts, resolveInside, sendFile } from './files.js';
-import { repoRoot, changes as gitChanges, fileDiff, commitAll, push as gitPush, pullRequest, createPullRequest, failedCheckLogs, sessionWorktree } from './git.js';
+import { repoRoot, changes as gitChanges, fileDiff, branchChanges, branchFileDiff, commitAll, discardFile, push as gitPush, pullRequest, createPullRequest, failedCheckLogs, sessionWorktree, listWorktrees, removeWorktree, mergeWorktree, listIssues } from './git.js';
+import { compareStore, compareSummary, buildReviewPrompt } from './compare.js';
+import { checkpointStore, captureCheckpoint, revertToCheckpoint, checkpointChanges, checkpointFileDiff } from './checkpoints.js';
+import { queueStore, queueSummary, planModePrompt, steerPrompt } from './queue.js';
+import { discoverScripts, scriptResultsFor, runProjectScript } from './scripts.js';
 import { remoteStore, probeTailscale, findCloudflared } from './remote.js';
 import { interruptCodexThread } from './codex-app.js';
 import { uploadStore, attachmentNote, UPLOAD_ID } from './uploads.js';
@@ -52,6 +56,9 @@ const remote = remoteStore(dataDir);
 const uploads = uploadStore(dataDir);
 const attempts = new Map();
 const exchanges = exchangeStore(dataDir);
+const comparisons = compareStore(dataDir);
+const checkpoints = checkpointStore(dataDir);
+const queue = queueStore(dataDir);
 // The `shed` command agents run (bin/shed) finds Shed through agent.json: this port and a key that only works from this Mac.
 const agentKey = crypto.randomBytes(24).toString('base64url');
 fs.writeFileSync(path.join(dataDir, 'agent.json'), JSON.stringify({ port, key:agentKey }), { mode:0o600 });
@@ -567,7 +574,7 @@ function writeJson(res, status, text, headers = {}) {
   res.end(packed ? packed.data : text);
 }
 // Lists only need what a row shows; the full task (reply text and all) loads when one is opened.
-const taskSummary = t => ({ id:t.id, title:t.title, status:t.status, harness:t.harness, sessionId:t.sessionId, cwd:t.cwd, createdAt:t.createdAt, updatedAt:t.updatedAt, delivery:t.delivery, tty:t.tty, waitingOn:t.waitingOn, handoffFrom:t.handoffFrom, returnedTo:t.returnedTo, model:t.model, modelSource:t.modelSource, routeSource:t.routeSource, error:(t.error || '').slice(0, 300) });
+const taskSummary = t => ({ id:t.id, title:t.title, status:t.status, harness:t.harness, mode:t.mode || 'build', sessionId:t.sessionId, cwd:t.cwd, createdAt:t.createdAt, updatedAt:t.updatedAt, delivery:t.delivery, tty:t.tty, waitingOn:t.waitingOn, handoffFrom:t.handoffFrom, returnedTo:t.returnedTo, model:t.model, modelSource:t.modelSource, routeSource:t.routeSource, error:(t.error || '').slice(0, 300) });
 const publicTask = ({ agentPrompt, transcriptFile, transcriptOffset, claudeSessionId, nativeSessionId, submitRetries, lastSubmitRetry, waitNotified, ...rest }) => rest;
 function sendText(res, status, text) {
   res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type':'text/plain; charset=utf-8', 'Cache-Control':'no-store' });
@@ -785,6 +792,53 @@ async function autoCloseIdle() {
 // processes, then sends the message to the other session as a task, whose reply goes back to the asking agent.
 const TALKERS = ['claude', 'codex'];
 function syncExchanges() { if (exchanges.sync(id => tasks.find(t => t.id === id))) broadcast('exchanges', {}); }
+function syncComparisons() { const list = sessions(); if (comparisons.sync(id => tasks.find(t => t.id === id), id => list.find(s => s.id === id))) broadcast('comparisons', {}); }
+// Automatically dispatches the next queued follow-up for any session that has become idle.
+const drainingSessions = new Set();
+async function drainQueue(targetSessionId = '') {
+  const ids = targetSessionId ? [targetSessionId] : queue.sessionsWithQueued();
+  if (!ids.length) return;
+  const list = sessions();
+  for (const sid of ids) {
+    if (drainingSessions.has(sid)) continue;
+    const session = list.find(s => s.id === sid);
+    if (!session) continue;
+    const busyProcess = [...active.values()].some(child => child.layaSessionId === sid);
+    const busyTask = tasks.some(t => t.sessionId === sid && ['running', 'queued', 'cancelling'].includes(t.status));
+    if (busyProcess || busyTask || session.liveState === 'working' || session.liveState === 'asking') continue;
+    const next = queue.takeNext(sid);
+    if (!next) continue;
+    drainingSessions.add(sid);
+    try {
+      const { input:planned, route, cwd, model } = await planTask({
+        prompt: next.prompt, mode: next.mode, harness: 'auto', model: next.model || '',
+        sessionId: sid, followup: next.followup || 'stay', newSession: false,
+        attachments: next.attachments || [], attachmentPaths: [], skipPermissions: Boolean(next.skipPermissions),
+      });
+      const targetCwd = route.session?.cwd || cwd;
+      if (next.mode !== 'plan' && targetCwd) {
+        const cp = await captureCheckpoint(targetCwd, { sessionId:sid, label:`Before: ${titleFor(next.prompt)}`, kind:'pre-turn' }).catch(() => null);
+        if (cp) checkpoints.add(cp);
+      }
+      const task = startTask({ ...planned, mode:next.mode }, route, model, cwd);
+      if (active.has(task.id)) active.get(task.id).layaSessionId = sid;
+      broadcast('queue', { sessionId:sid });
+      broadcast('sessions', {});
+    } catch (error) {
+      console.error(`Queue dispatch failed for ${sid}: ${error.message}`);
+    } finally {
+      drainingSessions.delete(sid);
+    }
+  }
+}
+function recordPostTurnCheckpoint(task) {
+  if (!task || task.mode === 'plan' || task.status !== 'completed' || !task.cwd || task.postCheckpointRecorded) return;
+  task.postCheckpointRecorded = true;
+  if (task.sessionId) checkpoints.attachSession(task.id, task.sessionId);
+  captureCheckpoint(task.cwd, { sessionId:task.sessionId || '', taskId:task.id, label:`After: ${task.title}`, kind:'post-turn' })
+    .then(cp => { if (cp) checkpoints.add(cp); })
+    .catch(() => {});
+}
 function parentOf(pid) {
   const result = spawnSync('/bin/ps', ['-o', 'ppid=,comm=', '-p', String(pid)], { encoding:'utf8', timeout:2000 });
   const match = (result.stdout || '').trim().match(/^(\d+)\s+(.+)$/);
@@ -960,7 +1014,9 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
 }
 
 function startTask(input, route, modelDecision, requestedCwd = '') {
+  const mode = input.mode === 'plan' ? 'plan' : 'build';
   let agentPrompt = (input.agentPrompt || input.prompt).trim();
+  if (mode === 'plan' && !input.agentPrompt) agentPrompt = planModePrompt(agentPrompt);
   const harness = route.session?.harness || route.harness;
   if (!available[harness]) throw new Error(`${harness} CLI is not installed on this desktop.`);
   if (harness === 'gemini' && route.session && !route.session.cwd && !requestedCwd) throw new Error('This Gemini record does not include its original project path, so it cannot be resumed safely.');
@@ -970,7 +1026,7 @@ function startTask(input, route, modelDecision, requestedCwd = '') {
   const attachments = [...(input.attachmentPaths || []), ...uploads.place(input.attachments || [], cwd === root ? '' : cwd)];
   agentPrompt += attachmentNote(attachments);
   const task = {
-    id: crypto.randomUUID(), prompt: input.prompt.trim(), title: titleFor(input.prompt),
+    id: crypto.randomUUID(), prompt: input.prompt.trim(), title: titleFor(input.prompt), mode,
     status: 'running', harness, sessionId: route.session?.id || null,
     handoffFrom: route.handoffFrom || null,
     routeReason: route.reason, routeSource: route.source || 'local', routeFallbackReason:route.fallbackReason || '',
@@ -992,7 +1048,7 @@ function startTask(input, route, modelDecision, requestedCwd = '') {
   const modelArgs = modelDecision.model ? ['--model', modelDecision.model] : [];
   function buildArgs(resumeSession, promptText) {
     if (harness === 'codex') return resumeSession ? ['exec', 'resume', '--json', '--skip-git-repo-check', ...modelArgs, resumeSession.nativeId, '-'] : ['exec', '--json', '--skip-git-repo-check', ...modelArgs, '-C', cwd, '-'];
-    if (harness === 'claude') return ['-p', promptText, '--output-format', 'stream-json', '--verbose', ...modelArgs, ...(resumeSession ? ['--resume', resumeSession.nativeId] : [])];
+    if (harness === 'claude') return ['-p', promptText, '--output-format', 'stream-json', '--verbose', ...(mode === 'plan' ? ['--permission-mode', 'plan'] : []), ...modelArgs, ...(resumeSession ? ['--resume', resumeSession.nativeId] : [])];
     if (harness === 'gemini') return ['-p', promptText, '-o', 'stream-json', ...modelArgs, ...(resumeSession ? ['--resume', resumeSession.nativeId] : [])];
     if (harness === 'pi') return ['-p', '--mode', 'json', ...modelArgs, ...(resumeSession ? ['--session', resumeSession.file] : []), promptText];
     if (harness === 'antigravity') {
@@ -1072,6 +1128,8 @@ function startTask(input, route, modelDecision, requestedCwd = '') {
       const agFailed = harness === 'antigravity' && ['ERROR', 'INVALID'].includes(agResultStatus);
       updateTask(task, { status: task.status === 'cancelling' ? 'cancelled' : code === 0 && !agFailed ? 'completed' : 'failed', exitCode: code, updatedAt: new Date().toISOString() });
       active.delete(task.id); sessions(true);
+      recordPostTurnCheckpoint(task);
+      if (task.sessionId) drainQueue(task.sessionId).catch(() => {});
     });
   }
   launch(route.session, agentPrompt);
@@ -1121,14 +1179,29 @@ function serveStatic(req, res, pathname) {
 const gitBusy = new Set();
 async function gitAction(session, input) {
   const action = String(input.action || '');
-  if (!['commit', 'push', 'pr', 'ship'].includes(action)) throw new Error('Unknown git action.');
+  if (!['commit', 'push', 'pr', 'ship', 'discard', 'merge', 'remove-worktree'].includes(action)) throw new Error('Unknown git action.');
   if (gitBusy.has(session.cwd)) throw new Error('Git is already busy with this project. Try again in a moment.');
   gitBusy.add(session.cwd);
   try {
     const done = {};
+    if (action === 'discard') {
+      done.discarded = await discardFile(session.cwd, String(input.file || ''));
+      return { ok:true, ...done, changes:await gitChanges(session.cwd) };
+    }
+    if (action === 'merge') {
+      done.merge = await mergeWorktree(session.cwd, { targetBranch:String(input.targetBranch || ''), removeAfter:Boolean(input.removeAfter) });
+      if (done.merge.removed) { hideSessions([session.id], true); broadcast('sessions', {}); }
+      return { ok:true, ...done, changes:done.merge.removed ? { repo:false, removed:true } : await gitChanges(session.cwd) };
+    }
+    if (action === 'remove-worktree') {
+      done.removed = await removeWorktree(session.cwd, { force:Boolean(input.force), deleteBranch:input.deleteBranch !== false });
+      hideSessions([session.id], true);
+      broadcast('sessions', {});
+      return { ok:true, ...done, changes:{ repo:false, removed:true } };
+    }
     if (action === 'commit' || action === 'ship') {
       const state = await gitChanges(session.cwd);
-      if (state.files.length) done.commit = await commitAll(session.cwd, input.message);
+      if (state.files.length) done.commit = await commitAll(session.cwd, input.message, { verify:Boolean(input.verify) });
       else if (action === 'commit') throw new Error('There is nothing to commit.');
     }
     if (action === 'push' || action === 'ship') done.push = await gitPush(session.cwd);
@@ -1327,10 +1400,10 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/bootstrap' && req.method === 'GET') {
       // Everything the app needs to open, in one round trip: who you are, sessions, tasks, harness health and models.
       // The list versions match what /api/sessions and /api/tasks give, so the next poll answers "same".
-      refreshQueuedTasks(); syncExchanges();
+      refreshQueuedTasks(); syncExchanges(); syncComparisons();
       const sessionList = JSON.stringify({ sessions:sessions().map(publicSession) }), taskList = JSON.stringify({ tasks:tasks.slice(0, 60).map(taskSummary), exchanges:exchanges.all().slice(0, 40).map(exchangeSummary) });
       const cached = harnessHealth(), health = Object.keys(cached || {}).length ? cached : await checkHealth();
-      return writeJson(res, 200, `{"me":${JSON.stringify(meInfo(req))},"sessions":${sessionList.slice(12, -1)},"sessionsV":"${versionOf(sessionList)}","tasks":${taskList.slice(9, taskList.indexOf(',"exchanges":'))},"exchanges":${taskList.slice(taskList.indexOf(',"exchanges":') + 13, -1)},"tasksV":"${versionOf(taskList)}","harnesses":${JSON.stringify(health)},"models":${JSON.stringify(Object.fromEntries(harnesses.map(harness => [harness, modelConfig(harness, settings.modelRouting)])))}}`);
+      return writeJson(res, 200, `{"me":${JSON.stringify(meInfo(req))},"sessions":${sessionList.slice(12, -1)},"sessionsV":"${versionOf(sessionList)}","tasks":${taskList.slice(9, taskList.indexOf(',"exchanges":'))},"exchanges":${taskList.slice(taskList.indexOf(',"exchanges":') + 13, -1)},"tasksV":"${versionOf(taskList)}","comparisons":${JSON.stringify(comparisons.all().slice(0, 20).map(compareSummary))},"harnesses":${JSON.stringify(health)},"models":${JSON.stringify(Object.fromEntries(harnesses.map(harness => [harness, modelConfig(harness, settings.modelRouting)])))}}`);
     }
     if (pathname === '/api/me' && req.method === 'GET') return send(res, 200, meInfo(req));
     // Remote access (Tailscale, own Cloudflare Named Tunnel, Quick Tunnel, custom URL, or local only).
@@ -1434,6 +1507,173 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/branches' && req.method === 'GET') return send(res, 200, { ownBranch:settings.ownBranch !== false });
     if (pathname === '/api/branches' && req.method === 'POST') { const input = await body(req); settings = { ...settings, ownBranch:input.ownBranch !== false }; saveSettings(); return send(res, 200, { ownBranch:settings.ownBranch }); }
+    // Worktree management: list Shed-managed branch worktrees, remove one, or clean up all merged worktrees in one tap.
+    if (pathname === '/api/worktrees' && req.method === 'GET') return send(res, 200, { worktrees:await listWorktrees() });
+    if (pathname === '/api/worktrees/remove' && req.method === 'POST') {
+      const input = await body(req);
+      if (typeof input.path !== 'string' || !input.path.trim()) return send(res, 400, { error:'Choose a worktree to remove.' });
+      const removed = await removeWorktree(input.path, { force:Boolean(input.force), deleteBranch:input.deleteBranch !== false });
+      const affected = sessions().filter(s => s.cwd === removed.removed).map(s => s.id);
+      if (affected.length) hideSessions(affected, true);
+      broadcast('sessions', {});
+      return send(res, 200, { ok:true, removed, worktrees:await listWorktrees() });
+    }
+    if (pathname === '/api/worktrees/cleanup' && req.method === 'POST') {
+      const input = await body(req);
+      const all = await listWorktrees();
+      const targets = Array.isArray(input.paths) && input.paths.length
+        ? all.filter(w => input.paths.includes(w.path))
+        : all.filter(w => w.merged && !w.dirty);
+      const removed = [], failed = [];
+      for (const wt of targets) {
+        try {
+          const resWt = await removeWorktree(wt.path, { force:Boolean(input.force), deleteBranch:true });
+          removed.push(resWt);
+        } catch (error) { failed.push({ path:wt.path, branch:wt.branch, error:error.message }); }
+      }
+      const removedPaths = new Set(removed.map(r => r.removed));
+      const affected = sessions().filter(s => removedPaths.has(s.cwd)).map(s => s.id);
+      if (affected.length) hideSessions(affected, true);
+      if (removed.length) broadcast('sessions', {});
+      return send(res, 200, { ok:true, removed, failed, worktrees:await listWorktrees() });
+    }
+    // Open GitHub issues for a known session project, so you can start a session straight from an issue.
+    if (pathname === '/api/issues' && req.method === 'GET') {
+      const query = new URL(req.url, 'http://x').searchParams;
+      const cwd = String(query.get('cwd') || '');
+      const allowed = cwd && sessions().some(s => s.cwd === cwd) && fs.existsSync(cwd);
+      if (!allowed) return send(res, 400, { error:'Pick an existing git project first.' });
+      return send(res, 200, await listIssues(cwd, { fresh:query.get('fresh') === '1' }));
+    }
+    // Fan-out & Compare: launch the same prompt across 2–4 harnesses in parallel isolated worktrees and pick a winner.
+    if (pathname === '/api/comparisons' && req.method === 'GET') {
+      refreshQueuedTasks(); syncComparisons();
+      return sendVersioned(req, res, { comparisons:comparisons.all().slice(0, 25).map(compareSummary) });
+    }
+    const comparePickMatch = pathname.match(/^\/api\/comparisons\/([\w-]{1,40})\/pick$/);
+    if (comparePickMatch && req.method === 'POST') {
+      const comp = comparisons.get(comparePickMatch[1]);
+      if (!comp) return send(res, 404, { error:'Comparison not found.' });
+      const input = await body(req);
+      const winner = (comp.entries || []).find(e => e.taskId === input.taskId || (input.sessionId && e.sessionId === input.sessionId));
+      if (!winner) return send(res, 400, { error:'Choose one of the comparison entries as the winner.' });
+      const cleaned = [], errors = [];
+      if (input.cleanupOthers !== false) {
+        const losers = comp.entries.filter(e => e.taskId !== winner.taskId);
+        const loserSessions = [];
+        for (const loser of losers) {
+          if (loser.sessionId) loserSessions.push(loser.sessionId);
+          // End running loser agent if active
+          const session = loser.sessionId ? sessions().find(s => s.id === loser.sessionId) : null;
+          const target = session ? endTarget(session) : null;
+          if (target) await endAgent(target).catch(() => {});
+          if (loser.branch && loser.cwd && loser.cwd !== winner.cwd && fs.existsSync(loser.cwd)) {
+            try {
+              await removeWorktree(loser.cwd, { force:Boolean(input.force), deleteBranch:true });
+              loser.cleaned = true;
+              cleaned.push(loser.branch);
+            } catch (error) { errors.push({ harness:loser.harness, branch:loser.branch, error:error.message }); }
+          }
+        }
+        if (loserSessions.length) hideSessions(loserSessions, true);
+      }
+      const updated = comparisons.update(comp.id, { status:'decided', winnerTaskId:winner.taskId, winnerHarness:winner.harness, entries:comp.entries });
+      broadcast('comparisons', {}); broadcast('sessions', {});
+      return send(res, 200, { ok:true, comparison:compareSummary(updated), cleaned, errors });
+    }
+    const compareDetailMatch = pathname.match(/^\/api\/comparisons\/([\w-]{1,40})$/);
+    if (compareDetailMatch && req.method === 'GET') {
+      refreshQueuedTasks(); syncComparisons();
+      const comp = comparisons.get(compareDetailMatch[1]);
+      if (!comp) return send(res, 404, { error:'Comparison not found.' });
+      const entries = await Promise.all((comp.entries || []).map(async entry => {
+        let diff = null;
+        if (entry.cwd && fs.existsSync(entry.cwd)) {
+          try {
+            const st = await gitChanges(entry.cwd);
+            if (st.repo) diff = { branch:st.branch, filesCount:st.files.length, additions:st.additions, deletions:st.deletions, files:st.files.slice(0, 20).map(f => ({ path:f.path, status:f.status, additions:f.additions, deletions:f.deletions })) };
+          } catch {}
+        }
+        const task = tasks.find(t => t.id === entry.taskId);
+        return { ...entry, output:String(task?.output || entry.output || '').slice(-4000), error:String(task?.error || entry.error || '').slice(-600), diff };
+      }));
+      return send(res, 200, { comparison:{ ...compareSummary(comp), prompt:comp.prompt, entries } });
+    }
+    if (pathname === '/api/comparisons' && req.method === 'POST') {
+      const input = await body(req);
+      const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
+      if (!prompt || prompt.length > 20000) return send(res, 400, { error:'Prompt must be between 1 and 20,000 characters.' });
+      const chosen = [...new Set((Array.isArray(input.harnesses) ? input.harnesses : []).filter(h => harnesses.includes(h)))].slice(0, 4);
+      if (chosen.length < 2) return send(res, 400, { error:'Pick at least 2 harnesses to compare.' });
+      const health = Object.keys(harnessHealth() || {}).length ? harnessHealth() : await checkHealth();
+      const notReady = chosen.filter(h => health[h]?.state !== 'ready');
+      if (notReady.length) return send(res, 400, { error:`Not ready: ${notReady.join(', ')}.` });
+      const attachmentIds = Array.isArray(input.attachments) ? input.attachments.filter(id => typeof id === 'string' && UPLOAD_ID.test(id)).slice(0, 10) : [];
+      const baseCwdInput = typeof input.cwd === 'string' && sessions().some(s => s.cwd === input.cwd) ? input.cwd : '';
+      let baseCwd = baseCwdInput;
+      if (input.newWorkspace) {
+        const name = String(input.newWorkspace).trim();
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9 ._-]{0,59}$/.test(name) || name === '.' || name === '..') return send(res, 400, { error:'Workspace names must be 1–60 letters, numbers, spaces, dots, dashes, or underscores.' });
+        baseCwd = path.join(os.homedir(), 'Shed Workspaces', name);
+        fs.mkdirSync(baseCwd, { recursive:true });
+      }
+      const isGitRepo = baseCwd ? Boolean(await repoRoot(baseCwd)) : false;
+      const sharedAttachments = attachmentIds.length ? uploads.place(attachmentIds, baseCwd || '') : [];
+      const compId = crypto.randomUUID().slice(0, 8);
+      const entries = [];
+      for (const h of chosen) {
+        let entryCwd = baseCwd || autoWorkspace(`${prompt} ${h}`, false);
+        let branch = '';
+        let project = baseCwd || entryCwd;
+        if (isGitRepo) {
+          const wt = await sessionWorktree(baseCwd, prompt, { suffix:h });
+          if (wt) { entryCwd = wt.path; branch = wt.branch; project = wt.project; }
+        } else if (baseCwd) {
+          entryCwd = autoWorkspace(`${path.basename(baseCwd)}-${h}`, false);
+        }
+        const planned = await planTask({ prompt, harness:h, model:String(input.models?.[h] || ''), cwd:entryCwd, newSession:true, sessionId:null, followup:'auto', attachments:[], attachmentPaths:sharedAttachments, skipPermissions:Boolean(input.skipPermissions) });
+        // planTask may normalize cwd only against known sessions, so pass our isolated entryCwd explicitly to startTask
+        const task = startTask(planned.input, planned.route, planned.model, entryCwd);
+        Object.assign(task, { compareId:compId, ...(branch ? { branch, project } : {}) });
+        saveTasks();
+        entries.push({ harness:h, model:task.model || '', taskId:task.id, sessionId:task.sessionId || null, cwd:entryCwd, branch, status:task.status, liveState:'working', output:'', error:'' });
+      }
+      const record = comparisons.add({
+        id: compId,
+        title: titleFor(prompt),
+        prompt,
+        project: baseCwd || entries[0]?.cwd || '',
+        status: 'running',
+        winnerTaskId: null,
+        winnerHarness: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        entries,
+      });
+      broadcast('comparisons', {});
+      return send(res, 201, { comparison:compareSummary(record) });
+    }
+    // Cross-harness code review: start another ready harness on the same checkout to review this session's changes.
+    const reviewMatch = pathname.match(/^\/api\/sessions\/(.+)\/review$/);
+    if (reviewMatch && req.method === 'POST') {
+      const author = sessions(true).find(s => s.id === decodeURIComponent(reviewMatch[1]));
+      if (!author) return send(res, 404, { error:'Session not found.' });
+      if (!author.cwd || !fs.existsSync(author.cwd)) return send(res, 404, { error:'This session has no project folder on the Mac.' });
+      const input = await body(req);
+      const health = Object.keys(harnessHealth() || {}).length ? harnessHealth() : await checkHealth();
+      const ready = Object.entries(health).filter(([, st]) => st.state === 'ready').map(([name]) => name);
+      const requested = typeof input.harness === 'string' && input.harness && input.harness !== 'auto' ? input.harness : '';
+      const targetHarness = requested || ready.find(h => h !== author.harness) || ready[0];
+      if (!targetHarness || !ready.includes(targetHarness)) return send(res, 400, { error:requested ? `${requested} is not ready.` : 'No ready harness available to run a review.' });
+      const st = await gitChanges(author.cwd).catch(() => ({ repo:false, files:[] }));
+      const canAskAuthor = author.liveState !== 'history' && TALKERS.includes(author.harness) && TALKERS.includes(targetHarness);
+      const reviewText = buildReviewPrompt({ authorSession:author, branch:st.branch || '', files:st.files || [], focus:String(input.focus || '').slice(0, 2000), shedCli, canAskAuthor });
+      const planned = await planTask({ prompt:`Review ${label[author.harness] || author.harness}'s changes in ${projectLabel(author.cwd)}`, agentPrompt:reviewText, harness:targetHarness, model:String(input.model || ''), cwd:author.cwd, newSession:true, sessionId:null, followup:'auto', attachments:[], attachmentPaths:[], skipPermissions:Boolean(input.skipPermissions) });
+      const task = startTask({ ...planned.input, agentPrompt:reviewText }, planned.route, planned.model, author.cwd);
+      Object.assign(task, { reviewOf:author.id });
+      saveTasks();
+      return send(res, 201, { task:publicTask(task) });
+    }
     if (pathname === '/api/autoroute' && req.method === 'GET') return send(res, 200, { prefs:autoRoutePrefs(settings.autoRoute, harnesses) });
     if (pathname === '/api/autoroute' && req.method === 'POST') {
       const input = await body(req);
@@ -1458,14 +1698,140 @@ const server = http.createServer(async (req, res) => {
       if (!file) return send(res, 404, { error:'That file is not available.' });
       return sendFile(req, res, file, query.get('download') === '1');
     }
-    // Git for developers: what a session changed, one file's diff, and commit / push / pull request from the phone.
+    // Git for developers: what a session changed (uncommitted or whole branch), diffs, checkpoints, scripts, and shipping.
+    const cpActionMatch = pathname.match(/^\/api\/sessions\/(.+)\/checkpoints\/(cp-[a-f0-9]+)\/(changes|diff|revert)$/);
+    if (cpActionMatch) {
+      const session = sessions().find(s => s.id === decodeURIComponent(cpActionMatch[1]));
+      const cwd = session?.cwd, cpId = cpActionMatch[2], action = cpActionMatch[3], query = new URL(req.url, 'http://x').searchParams;
+      if (!cwd || cwd === '/' || !fs.existsSync(cwd)) return send(res, 404, { error:'This session has no project folder on the Mac.' });
+      const cp = checkpoints.get(cpId);
+      const root = await repoRoot(cwd);
+      if (!cp || (root && cp.root !== root)) return send(res, 404, { error:'Checkpoint not found for this project.' });
+      if (action === 'changes' && req.method === 'GET') {
+        const toId = query.get('to') || '';
+        const toCp = toId && toId !== 'working' ? checkpoints.get(toId) : null;
+        return send(res, 200, await checkpointChanges(cwd, cp.commit, toCp?.commit || ''));
+      }
+      if (action === 'diff' && req.method === 'GET') {
+        const toId = query.get('to') || '';
+        const toCp = toId && toId !== 'working' ? checkpoints.get(toId) : null;
+        return send(res, 200, await checkpointFileDiff(cwd, cp.commit, toCp?.commit || '', String(query.get('path') || '')));
+      }
+      if (action === 'revert' && req.method === 'POST') {
+        if (gitBusy.has(cwd)) return send(res, 409, { error:'Git is already busy with this project. Try again in a moment.' });
+        gitBusy.add(cwd);
+        try {
+          const backup = await captureCheckpoint(cwd, { sessionId:session.id, label:`Backup before rewind to "${cp.label}"`, kind:'pre-revert' }).catch(() => null);
+          if (backup) checkpoints.add(backup);
+          await revertToCheckpoint(cwd, cp.commit);
+          return send(res, 200, { ok:true, reverted:cp, backup, changes:await gitChanges(cwd), checkpoints:checkpoints.forSession(session.id, root) });
+        } finally { gitBusy.delete(cwd); }
+      }
+      return send(res, 405, { error:'Not allowed.' });
+    }
+    const cpListMatch = pathname.match(/^\/api\/sessions\/(.+)\/checkpoints$/);
+    if (cpListMatch) {
+      const session = sessions().find(s => s.id === decodeURIComponent(cpListMatch[1]));
+      const cwd = session?.cwd;
+      if (!cwd || cwd === '/' || !fs.existsSync(cwd)) return send(res, 404, { error:'This session has no project folder on the Mac.' });
+      const root = await repoRoot(cwd);
+      if (req.method === 'GET') return send(res, 200, { repo:Boolean(root), checkpoints:root ? checkpoints.forSession(session.id, root) : [] });
+      if (req.method === 'POST') {
+        if (!root) return send(res, 400, { error:'This folder is not a git repository.' });
+        const input = await body(req);
+        const cp = await captureCheckpoint(cwd, { sessionId:session.id, label:String(input.label || 'Manual checkpoint').trim().slice(0, 120) || 'Manual checkpoint', kind:'manual' });
+        if (cp) checkpoints.add(cp);
+        return send(res, 201, { checkpoint:cp, checkpoints:checkpoints.forSession(session.id, root) });
+      }
+      return send(res, 405, { error:'Not allowed.' });
+    }
+    // Per-project quick scripts (test, lint, build, or custom .shed.yaml scripts) run in the session's folder.
+    const scriptsMatch = pathname.match(/^\/api\/sessions\/(.+)\/scripts(\/run)?$/);
+    if (scriptsMatch) {
+      const session = sessions().find(s => s.id === decodeURIComponent(scriptsMatch[1]));
+      const cwd = session?.cwd;
+      if (!cwd || cwd === '/' || !fs.existsSync(cwd)) return send(res, 404, { error:'This session has no project folder on the Mac.' });
+      if (!scriptsMatch[2] && req.method === 'GET') {
+        return send(res, 200, { scripts:discoverScripts(cwd), runs:scriptResultsFor(cwd) });
+      }
+      if (scriptsMatch[2] === '/run' && req.method === 'POST') {
+        const input = await body(req);
+        const result = await runProjectScript(cwd, String(input.id || ''));
+        return send(res, 200, { result, runs:scriptResultsFor(cwd) });
+      }
+      return send(res, 405, { error:'Not allowed.' });
+    }
+    // Universal per-session follow-up queue & mid-run steering.
+    const queueCancelMatch = pathname.match(/^\/api\/queue\/(q-[a-f0-9]+)$/);
+    if (queueCancelMatch && req.method === 'DELETE') {
+      const removed = queue.cancel(queueCancelMatch[1]);
+      if (!removed) return send(res, 404, { error:'Queued message not found.' });
+      broadcast('queue', { sessionId:removed.sessionId });
+      return send(res, 200, { ok:true, items:queue.forSession(removed.sessionId).map(queueSummary) });
+    }
+    const sessionQueueMatch = pathname.match(/^\/api\/sessions\/(.+)\/(queue|steer)$/);
+    if (sessionQueueMatch) {
+      const sid = decodeURIComponent(sessionQueueMatch[1]), kind = sessionQueueMatch[2];
+      const session = sessions(true).find(s => s.id === sid);
+      if (!session) return send(res, 404, { error:'Session not found.' });
+      if (kind === 'queue' && req.method === 'GET') return send(res, 200, { items:queue.forSession(sid).map(queueSummary) });
+      if (kind === 'queue' && req.method === 'POST') {
+        const input = await body(req);
+        const attachmentIds = Array.isArray(input.attachments) ? input.attachments.filter(id => typeof id === 'string' && UPLOAD_ID.test(id)).slice(0, 10) : [];
+        const item = queue.enqueue({ sessionId:sid, prompt:input.prompt, mode:input.mode, model:input.model, followup:input.followup, attachments:attachmentIds, skipPermissions:Boolean(input.skipPermissions) });
+        broadcast('queue', { sessionId:sid });
+        // If the session is already idle, drain immediately!
+        drainQueue(sid).catch(() => {});
+        return send(res, 201, { item:queueSummary(item), items:queue.forSession(sid).map(queueSummary) });
+      }
+      if (kind === 'steer' && req.method === 'POST') {
+        const input = await body(req);
+        let prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
+        let mode = input.mode === 'plan' ? 'plan' : 'build';
+        let modelChoice = typeof input.model === 'string' ? input.model : '';
+        let attachments = [];
+        if (input.queueId) {
+          const promoted = queue.takeById(String(input.queueId));
+          if (!promoted) return send(res, 404, { error:'Queued message is no longer pending.' });
+          prompt = promoted.prompt; mode = promoted.mode || 'build'; modelChoice = promoted.model || ''; attachments = promoted.attachments || [];
+          broadcast('queue', { sessionId:sid });
+        }
+        if (!prompt || prompt.length > 20000) return send(res, 400, { error:'Write a steering message first.' });
+        // Interrupt an active turn first so the steering message lands immediately.
+        const runningTask = tasks.find(t => t.sessionId === sid && active.has(t.id));
+        if (runningTask) {
+          const child = active.get(runningTask.id);
+          updateTask(runningTask, { status:'cancelling' });
+          child?.kill('SIGTERM');
+          await new Promise(resolve => setTimeout(resolve, 250));
+          active.delete(runningTask.id);
+          updateTask(runningTask, { status:'cancelled', error:'Interrupted for mid-run steering.', updatedAt:new Date().toISOString() });
+        } else if (session.liveState === 'working' && session.tty) {
+          await typeIntoTerminalAsync(session.tty, '\u0003').catch(() => {});
+          await new Promise(resolve => setTimeout(resolve, 400));
+        } else if (session.liveState === 'working' && session.harness === 'codex' && !session.tty) {
+          await interruptCodexThread(session.nativeId).catch(() => {});
+        }
+        const { input:planned, route, cwd, model } = await planTask({ prompt, agentPrompt:mode === 'plan' ? planModePrompt(prompt) : steerPrompt(prompt), mode, sessionId:sid, followup:'stay', harness:'auto', model:modelChoice, newSession:false, attachments, attachmentPaths:[] });
+        const targetCwd = route.session?.cwd || cwd;
+        if (mode !== 'plan' && targetCwd) {
+          const cp = await captureCheckpoint(targetCwd, { sessionId:sid, label:`Before steer: ${titleFor(prompt)}`, kind:'pre-turn' }).catch(() => null);
+          if (cp) checkpoints.add(cp);
+        }
+        const task = startTask({ ...planned, mode }, route, model, cwd);
+        if (active.has(task.id)) active.get(task.id).layaSessionId = sid;
+        return send(res, 201, { task:publicTask(task) });
+      }
+      return send(res, 405, { error:'Not allowed.' });
+    }
     const gitMatch = pathname.match(/^\/api\/sessions\/(.+)\/(changes|diff|git|pr|check-logs)$/);
     if (gitMatch) {
       const session = sessions().find(s => s.id === decodeURIComponent(gitMatch[1]));
       const cwd = session?.cwd, kind = gitMatch[2], query = new URL(req.url, 'http://x').searchParams;
       if (!cwd || cwd === '/' || !fs.existsSync(cwd)) return send(res, 404, { error:'This session has no project folder on the Mac.' });
-      if (kind === 'changes' && req.method === 'GET') return sendVersioned(req, res, await gitChanges(cwd));
-      if (kind === 'diff' && req.method === 'GET') return send(res, 200, await fileDiff(cwd, String(query.get('path') || '')));
+      const scope = query.get('scope') === 'branch' ? 'branch' : 'uncommitted';
+      if (kind === 'changes' && req.method === 'GET') return sendVersioned(req, res, scope === 'branch' ? await branchChanges(cwd) : await gitChanges(cwd));
+      if (kind === 'diff' && req.method === 'GET') return send(res, 200, scope === 'branch' ? await branchFileDiff(cwd, String(query.get('path') || '')) : await fileDiff(cwd, String(query.get('path') || '')));
       if (kind === 'pr' && req.method === 'GET') return send(res, 200, { pr:await pullRequest(cwd, { fresh:query.get('fresh') === '1' }) });
       if (kind === 'check-logs' && req.method === 'GET') {
         const { pr, failed, logs } = await failedCheckLogs(cwd);
@@ -1620,7 +1986,7 @@ const server = http.createServer(async (req, res) => {
       const { route, model } = await planTask({ ...input, prompt:input.prompt.slice(0, 20000), harness:'auto', newSession:false });
       return send(res, 200, { route: { harness:route.session?.harness || route.harness, handoff:Boolean(route.handoff), reason:route.reason, fallbackReason:route.fallbackReason || '', confidence:route.score ?? null, source:route.source, model:model.model, modelSource:model.source, modelReason:model.reason } });
     }
-    if (pathname === '/api/tasks' && req.method === 'GET') { refreshQueuedTasks(); syncExchanges(); return sendVersioned(req, res, { tasks: tasks.slice(0, 60).map(taskSummary), exchanges:exchanges.all().slice(0, 40).map(exchangeSummary) }); }
+    if (pathname === '/api/tasks' && req.method === 'GET') { refreshQueuedTasks(); syncExchanges(); syncComparisons(); return sendVersioned(req, res, { tasks: tasks.slice(0, 60).map(taskSummary), exchanges:exchanges.all().slice(0, 40).map(exchangeSummary) }); }
     // Introducing two sessions: the first is told how to reach the second, with the person's note on what to work out.
     if (pathname === '/api/exchanges/introduce' && req.method === 'POST') {
       const input = await body(req);
@@ -1652,9 +2018,30 @@ const server = http.createServer(async (req, res) => {
       // A new session in a git project works on a branch of its own, in its own checkout (continuations/handoffs stay in the original folder).
       const ownBranch = !route.session && !route.handoffFrom && cwd && input.ownBranch !== false && settings.ownBranch !== false ? await sessionWorktree(cwd, input.prompt) : null;
       if (ownBranch) cwd = ownBranch.path;
-      if (route.session?.liveState === 'working' && !['codex', 'claude'].includes(route.session.harness) && !(route.session.harness === 'antigravity' && route.session.tty)) return send(res, 409, { error: 'This desktop session is still working. Wait for it to finish before sending a follow-up.' });
-      if (route.session && [...active.values()].some(child => child.layaSessionId === route.session.id)) return send(res, 409, { error: 'This session is already running a task.' });
+      if (route.session?.liveState === 'working' && !['codex', 'claude'].includes(route.session.harness) && !(route.session.harness === 'antigravity' && route.session.tty)) {
+        if (input.queueIfBusy) {
+          const item = queue.enqueue({ sessionId:route.session.id, prompt:input.prompt, mode:input.mode, model:input.model, followup:input.followup, attachments:attachmentIds, skipPermissions:Boolean(input.skipPermissions) });
+          broadcast('queue', { sessionId:route.session.id });
+          return send(res, 202, { queued:true, item:queueSummary(item), items:queue.forSession(route.session.id).map(queueSummary) });
+        }
+        return send(res, 409, { error: 'This desktop session is still working. Wait for it to finish before sending a follow-up.' });
+      }
+      if (route.session && [...active.values()].some(child => child.layaSessionId === route.session.id)) {
+        if (input.queueIfBusy) {
+          const item = queue.enqueue({ sessionId:route.session.id, prompt:input.prompt, mode:input.mode, model:input.model, followup:input.followup, attachments:attachmentIds, skipPermissions:Boolean(input.skipPermissions) });
+          broadcast('queue', { sessionId:route.session.id });
+          return send(res, 202, { queued:true, item:queueSummary(item), items:queue.forSession(route.session.id).map(queueSummary) });
+        }
+        return send(res, 409, { error: 'This session is already running a task.' });
+      }
+      // Capture an automatic hidden Git checkpoint before a Build-mode turn so the user can rewind in one tap.
+      let preCheckpoint = null;
+      const targetCwd = route.session?.cwd || cwd;
+      if (input.mode !== 'plan' && targetCwd && !ownBranch) {
+        preCheckpoint = await captureCheckpoint(targetCwd, { sessionId:route.session?.id || '', label:`Before: ${titleFor(input.prompt)}`, kind:'pre-turn' }).catch(() => null);
+      }
       const task = startTask(input, route, model, cwd);
+      if (preCheckpoint) { preCheckpoint.taskId = task.id; checkpoints.add(preCheckpoint); task.preCheckpointId = preCheckpoint.id; saveTasks(); }
       if (ownBranch) { Object.assign(task, { branch:ownBranch.branch, project:ownBranch.project }); saveTasks(); }
       if (route.session && active.has(task.id)) active.get(task.id).layaSessionId = route.session.id;
       return send(res, 201, { task });
@@ -1703,7 +2090,7 @@ server.listen(port, host, () => {
   });
   setInterval(() => checkHealth().catch(error => console.error(`Harness health check failed: ${error.message}`)), 60000).unref();
   watchAndNotify();
-  setInterval(() => { sessions(true); watchAndNotify(); }, 10000).unref();
+  setInterval(() => { sessions(true); watchAndNotify(); drainQueue().catch(() => {}); }, 10000).unref();
   let lastRemoteKey = JSON.stringify(remoteStatus());
   setInterval(() => {
     const status = remoteStatus(), key = JSON.stringify(status);

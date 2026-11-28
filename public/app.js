@@ -1,5 +1,5 @@
 import { renderMarkdown } from './markdown.js';
-const state = { sessions: [], tasks: [], available: {}, health: {}, view: 'inbox', filter: 'all', selectedSession: null, selectedTask: null, previewTimer: null };
+const state = { sessions: [], tasks: [], comparisons: [], available: {}, health: {}, view: 'inbox', filter: 'all', selectedSession: null, selectedTask: null, selectedComparison: null, composerMode: 'single', runMode: 'build', compareHarnesses: new Set(), queueItems: [], previewTimer: null };
 // Messages sent from Shed, shown in the conversation until the session's transcript records them.
 state.pending = [];
 state.v = {}; // last version of each polled resource
@@ -86,7 +86,7 @@ async function showAuth() {
   } catch {}
 }
 function hideAuth() { $('#auth-screen').classList.add('hidden'); }
-function setView(view) { state.view = view; if (view === 'settings') { loadRemote(true); loadShareSettings(); prepareShareLink(); loadAutoClose(); loadAutoRoute(); loadBranchSetting(); } $('#phone-message').classList.toggle('hidden', view !== 'inbox'); $$('.view').forEach(el => el.classList.toggle('hidden', el.id !== `view-${view}`)); $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('#page-name').textContent = ({ inbox:'Command center', sessions:'Sessions', activity:'Activity', settings:'Settings' })[view]; const url = new URL(location.href); if (view === 'inbox') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.replaceState(null, '', url); document.querySelector('.sidebar').classList.remove('open'); $('#mobile-scrim').classList.add('hidden'); render(); }
+function setView(view) { state.view = view; if (view === 'settings') { loadRemote(true); loadShareSettings(); prepareShareLink(); loadAutoClose(); loadAutoRoute(); loadBranchSetting(); loadWorktrees(); } $('#phone-message').classList.toggle('hidden', view !== 'inbox'); $$('.view').forEach(el => el.classList.toggle('hidden', el.id !== `view-${view}`)); $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('#page-name').textContent = ({ inbox:'Command center', sessions:'Sessions', activity:'Activity', settings:'Settings' })[view]; const url = new URL(location.href); if (view === 'inbox') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.replaceState(null, '', url); document.querySelector('.sidebar').classList.remove('open'); $('#mobile-scrim').classList.add('hidden'); render(); }
 function hasHarnessSessions(name) { return state.sessions.some(s => s.harness === name); }
 function renderHarnesses() {
   const names = harnessNames;
@@ -127,7 +127,7 @@ document.addEventListener('focusout', e => {
   if (select instanceof HTMLSelectElement && select.dataset.pendingOptions) { const html = select.dataset.pendingOptions; delete select.dataset.pendingOptions; setOptions(select, html); }
 });
 function renderHarnessAvailability() { const names = harnessNames; const installed = Object.keys(names).filter(name => state.available[name]); const select = $('#harness-select'); const current = select.value; setOptions(select, '<option value="auto">✦ Laya chooses</option>' + installed.map(name => `<option value="${name}">${names[name]}</option>`).join('')); select.value = installed.includes(current) ? current : 'auto'; const editor = $('#model-editor-harness'); setOptions(editor, installed.map(name => `<option value="${name}">${names[name]}</option>`).join('')); if (!installed.length) setOptions(editor, '<option value="">No installed harnesses</option>'); }
-function updateHarnessReadiness() { const labels = { needs_auth:'sign in', offline:'offline', unknown:'check login', checking:'checking' }; const select = $('#harness-select'); for (const option of select.options) { if (option.value === 'auto') continue; const status = state.health[option.value]?.state || 'checking'; const label = `${harnessNames[option.value] || option.value}${status === 'ready' ? '' : ` · ${option.value === 'opencode' && status === 'needs_auth' ? 'connect provider' : labels[status] || 'unavailable'}`}`; if (option.disabled !== (status !== 'ready')) option.disabled = status !== 'ready'; if (option.textContent !== label) option.textContent = label; } if (select.selectedOptions[0]?.disabled) { select.value = 'auto'; renderModelChoices(); } }
+function updateHarnessReadiness() { const labels = { needs_auth:'sign in', offline:'offline', unknown:'check login', checking:'checking' }; const select = $('#harness-select'); for (const option of select.options) { if (option.value === 'auto') continue; const status = state.health[option.value]?.state || 'checking'; const label = `${harnessNames[option.value] || option.value}${status === 'ready' ? '' : ` · ${option.value === 'opencode' && status === 'needs_auth' ? 'connect provider' : labels[status] || 'unavailable'}`}`; if (option.disabled !== (status !== 'ready')) option.disabled = status !== 'ready'; if (option.textContent !== label) option.textContent = label; } if (select.selectedOptions[0]?.disabled) { select.value = 'auto'; renderModelChoices(); } renderComparePicker(); }
 function renderHealthDetails() { const issues = Object.entries(state.health).filter(([name, status]) => (state.available[name] || hasHarnessSessions(name)) && status.state !== 'ready' && status.state !== 'checking'); if (issues.length) $('#harness-list').insertAdjacentHTML('beforeend', `<div class="harness-health-details">${issues.map(([name, status]) => `<div title="${escapeHtml(status.detail)}"><b>${escapeHtml(harnessNames[name] || name)}:</b> ${escapeHtml(status.detail)}</div>`).join('')}</div>`); }
 async function refreshHarnessHealth() { try { const data = await api('/api/harness-health'); state.health = data.harnesses || {}; for (const [name, status] of Object.entries(state.health)) if (status?.checkedAt) state.available[name] = Boolean(status.installed); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); syncPhoneHarness(); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
 // The phone bar's project picker mirrors the composer's: a new folder (named from the message), a named new
@@ -144,7 +144,7 @@ $('#phone-project').addEventListener('change', () => {
   if (naming) $('#phone-workspace').focus();
 });
 function renderProjects() { const select = $('#project-select'); const current = select.value; const cwds = [...new Set(state.sessions.filter(s => !s.hidden).map(s => s.cwd).filter(Boolean))].sort((a,b) => projectName(a).localeCompare(projectName(b))); setOptions(select, '<option value="">New folder from your message</option><option value="__new__">+ New workspace</option>' + cwds.map(cwd => `<option value="${escapeHtml(cwd)}">${escapeHtml(projectName(cwd))}</option>`).join('')); select.value = [...select.options].some(option => option.value === current) ? current : ''; toggleNewWorkspace();  syncPhoneProject(); }
-function toggleNewWorkspace() { $('#new-workspace-row').classList.toggle('hidden', $('#project-select').value !== '__new__'); }
+function toggleNewWorkspace() { const val = $('#project-select').value; $('#new-workspace-row').classList.toggle('hidden', val !== '__new__'); $('#pick-issue-btn')?.classList.toggle('hidden', !val || val === '__new__'); }
 function modelOptions(harness) { return (modelState.configs[harness]?.models || []).filter(model => model.enabled).map(model => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.label || model.id)}</option>`).join(''); }
 function renderModelChoices() {
   const select = $('#model-select'), current = select.value;
@@ -401,6 +401,7 @@ function render() {
   const desk = live.length ? live.map(agentCard).join('') : `<div class="agent-empty">${agentSvg('pi', 'open')}<div><strong>No agents at their desks</strong><p>Start a session from the sidebar's + and it will show up here.</p></div></div>`;
   const deskPrint = fingerprint(desk);
   if ($('#active-sessions').dataset.print !== deskPrint) { $('#active-sessions').innerHTML = desk; $('#active-sessions').dataset.print = deskPrint; } // rebuilding every refresh would restart the animations
+  renderComparisons();
   renderTalk();
   $('#recent-sessions').innerHTML = shown.filter(s => s.liveState === 'history').slice(0,6).map(sessionRow).join('') || '<div class="table-empty">No previous desktop sessions found yet.</div>';
   // The Sessions and Activity lists are long; build them only while they are on screen.
@@ -449,7 +450,7 @@ function renderSessionList() {
 function renderActivity() {
   $('#activity-list').innerHTML = state.tasks.length ? state.tasks.map(t => `<div class="activity-item" data-task="${escapeHtml(t.id)}">${symbol(t.harness)}<div class="activity-main"><strong>${escapeHtml(t.title)}</strong><small>${escapeHtml(projectName(t.cwd))} · ${escapeHtml(t.model || 'default model')} (${escapeHtml(t.modelSource || 'harness-default')}) · ${escapeHtml(t.routeSource || 'local')} route · ${relative(t.createdAt)}</small></div><span class="badge ${escapeHtml(t.status)}">${escapeHtml(t.status)}</span></div>`).join('') : '<div class="empty-panel"><span class="empty-symbol">◷</span><div><strong>No tasks yet</strong><p>Sessions you start through Shed will appear here.</p></div></div>';
 }
-async function refresh() { if (document.hidden) return; try { const [s,t] = await Promise.all([api(`/api/sessions?v=${state.v.sessions || ''}`), api(`/api/tasks?v=${state.v.tasks || ''}`)]); let changed = false; if (!s.same) { state.sessions = s.sessions; state.v.sessions = s.v; changed = true; } if (!t.same) { state.tasks = t.tasks; state.exchanges = t.exchanges || []; state.v.tasks = t.v; changed = true; } if (changed) { renderProjects(); render(); } if (state.selectedTask) openTask(state.selectedTask, true); if (state.selectedSession) openSession(state.selectedSession.id, true); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
+async function refresh() { if (document.hidden) return; try { const [s,t,c] = await Promise.all([api(`/api/sessions?v=${state.v.sessions || ''}`), api(`/api/tasks?v=${state.v.tasks || ''}`), api(`/api/comparisons?v=${state.v.comparisons || ''}`)]); let changed = false; if (!s.same) { state.sessions = s.sessions; state.v.sessions = s.v; changed = true; } if (!t.same) { state.tasks = t.tasks; state.exchanges = t.exchanges || []; state.v.tasks = t.v; changed = true; } if (!c.same) { state.comparisons = c.comparisons || []; state.v.comparisons = c.v; changed = true; } if (changed) { renderProjects(); render(); } if (state.selectedTask) openTask(state.selectedTask, true); if (state.selectedSession) openSession(state.selectedSession.id, true); if (state.selectedComparison) openComparison(state.selectedComparison, true); } catch (error) { if (error.message === 'Authentication required.') showAuth(); } }
 // Live status: the Mac pushes Typing / Waiting / Needs your OK, device approvals and remote status changes as they happen.
 // Tracks server heartbeats so waking a phone from sleep immediately detects a dropped stream and reconnects cleanly.
 let lastEventAt = 0;
@@ -474,6 +475,8 @@ function connectEvents(force = false) {
   });
   events.addEventListener('sessions', () => { markAlive(); refresh(); });
   events.addEventListener('exchanges', () => { markAlive(); refresh(); });
+  events.addEventListener('comparisons', () => { markAlive(); refresh(); });
+  events.addEventListener('queue', () => { markAlive(); if (state.selectedSession) loadSessionQueue(state.selectedSession.id); });
   events.addEventListener('devices', () => { markAlive(); if (state.local || state.view === 'settings') loadDevices(); });
   events.addEventListener('remote', e => {
     markAlive();
@@ -492,7 +495,7 @@ setInterval(() => { if (!document.hidden && $('#auth-screen').classList.contains
 const BOOT_CACHE = 'shed-boot';
 function applyBoot(boot, fromCache = false) {
   Object.assign(state, boot.me);
-  state.sessions = boot.sessions; state.tasks = boot.tasks; state.exchanges = boot.exchanges || []; state.health = boot.harnesses || {};
+  state.sessions = boot.sessions; state.tasks = boot.tasks; state.exchanges = boot.exchanges || []; state.comparisons = boot.comparisons || []; state.health = boot.harnesses || {};
   if (!fromCache) { state.v.sessions = boot.sessionsV; state.v.tasks = boot.tasksV; }
   modelState.configs = boot.models;
   hideAuth(); renderHarnesses(); renderHarnessAvailability(); updateHarnessReadiness(); syncPhoneHarness();
@@ -510,8 +513,12 @@ async function init() {
     const requestedView = new URL(location.href).searchParams.get('view'); if (['sessions','activity','settings'].includes(requestedView)) setView(requestedView);
   } catch (error) { if (error.message === 'Authentication required.') { forgetBoot(); showAuth(); } else showFeedback(error.message); }
 }
-async function previewRoute() { const prompt = $('#prompt').value.trim(); if (prompt.length < 9) { $('#route-preview').classList.add('hidden'); return; } try { const selectedProject = $('#project-select').value; const data = await api('/api/route', { method:'POST', body:JSON.stringify({prompt, harness:$('#harness-select').value, model:$('#model-select').value, cwd:selectedProject === '__new__' ? '' : selectedProject, newWorkspace:selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:true}) }); if ($('#prompt').value.trim() !== prompt) return; const route = data.route; $('#route-preview').innerHTML = `<span class="route-symbol">✦</span><span><b>Local preview:</b> New ${escapeHtml(route.harness)} session · ${escapeHtml(route.reason)} · ${escapeHtml(route.model || 'harness default')} model</span>`; $('#route-preview').classList.remove('hidden'); } catch { $('#route-preview').classList.add('hidden'); } }
-async function sendTask(prompt, options = {}) { const attachKey = options.sessionId ? 'followup' : options.phone ? 'phone' : 'new', files = attached[attachKey]; if (files.some(f => f.status === 'uploading')) { showFeedback('Wait for the files to finish uploading.'); return false; } if (!prompt.trim() && !files.length) return; const button = options.sessionId ? $('#followup-send') : $('#send-button'); button.disabled = true; try { const selectedProject = $('#project-select').value; const isNew = !options.sessionId; if (files.some(f => f.status === 'failed')) throw new Error('Remove the files that failed to upload, then send again.'); const {task} = await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, harness:options.harness || $('#harness-select').value, model:options.model ?? (options.sessionId ? $('#followup-model').value : $('#model-select').value), cwd:options.cwd ?? (selectedProject === '__new__' ? '' : selectedProject), newWorkspace:isNew && selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:isNew, sessionId:options.sessionId || null, followup:options.followup || 'auto', attachments:files.map(f => f.id), skipPermissions:options.sessionId ? $('#followup-skip').checked : $('#skip-permissions').checked }) }); attached[attachKey] = []; renderAttachments(attachKey); $('#prompt').value = ''; $('#followup-prompt').value = ''; $('#followup-prompt').style.height = ''; state.followupPreviewKey = null; $('#followup-preview').classList.add('hidden'); $('#new-workspace').value = ''; $('#route-preview').classList.add('hidden');
+async function previewRoute() { if (state.composerMode === 'compare') { $('#route-preview').classList.add('hidden'); return; } const prompt = $('#prompt').value.trim(); if (prompt.length < 9) { $('#route-preview').classList.add('hidden'); return; } try { const selectedProject = $('#project-select').value; const data = await api('/api/route', { method:'POST', body:JSON.stringify({prompt, harness:$('#harness-select').value, model:$('#model-select').value, cwd:selectedProject === '__new__' ? '' : selectedProject, newWorkspace:selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:true}) }); if ($('#prompt').value.trim() !== prompt) return; const route = data.route; $('#route-preview').innerHTML = `<span class="route-symbol">✦</span><span><b>Local preview:</b> New ${escapeHtml(route.harness)} session · ${escapeHtml(route.reason)} · ${escapeHtml(route.model || 'harness default')} model</span>`; $('#route-preview').classList.remove('hidden'); } catch { $('#route-preview').classList.add('hidden'); } }
+async function sendTask(prompt, options = {}) {
+  if (!options.sessionId && !options.phone && state.composerMode === 'compare') return sendComparison(prompt);
+  const attachKey = options.sessionId ? 'followup' : options.phone ? 'phone' : 'new', files = attached[attachKey]; if (files.some(f => f.status === 'uploading')) { showFeedback('Wait for the files to finish uploading.'); return false; } if (!prompt.trim() && !files.length) return; const button = options.sessionId ? $('#followup-send') : $('#send-button'); button.disabled = true; try { const selectedProject = $('#project-select').value; const isNew = !options.sessionId; if (files.some(f => f.status === 'failed')) throw new Error('Remove the files that failed to upload, then send again.'); const runMode = options.mode || (options.sessionId ? ($('#followup-mode')?.value || 'build') : state.runMode); const resp = await api('/api/tasks', { method:'POST', body:JSON.stringify({ prompt, mode:runMode, queueIfBusy:Boolean(options.sessionId), harness:options.harness || $('#harness-select').value, model:options.model ?? (options.sessionId ? $('#followup-model').value : $('#model-select').value), cwd:options.cwd ?? (selectedProject === '__new__' ? '' : selectedProject), newWorkspace:isNew && selectedProject === '__new__' ? $('#new-workspace').value : '', newSession:isNew, sessionId:options.sessionId || null, followup:options.followup || 'auto', attachments:files.map(f => f.id), skipPermissions:options.sessionId ? $('#followup-skip').checked : $('#skip-permissions').checked }) }); attached[attachKey] = []; renderAttachments(attachKey); $('#prompt').value = ''; $('#followup-prompt').value = ''; $('#followup-prompt').style.height = ''; state.followupPreviewKey = null; $('#followup-preview').classList.add('hidden'); $('#new-workspace').value = ''; $('#route-preview').classList.add('hidden');
+  if (resp.queued && options.sessionId) { state.queueItems = resp.items || []; renderSessionQueue(); showFeedback('Queued — will run automatically when this turn finishes.'); return true; }
+  const { task } = resp;
   if (options.sessionId && !task.handoffFrom) { state.pending.push({ taskId:task.id, sessionId:options.sessionId, text:prompt.trim(), at:Date.now() }); state.pinBottom = true; await refresh(); return true; }
   state.followTask = task.id; await refresh(); openTask(task.id); return true; } catch (error) { showFeedback(error.message); return false; } finally { button.disabled = false; } }
 // The conversation stays pinned to its newest message until the person scrolls up, and re-pins at the bottom.
@@ -847,23 +854,53 @@ $('#drawer-files').addEventListener('click', e => {
     : `<a class="text-action" href="${src}" target="_blank" rel="noopener">Open ${escapeHtml(f.path.split('/').pop())} ↗</a>`;
   preview.classList.remove('hidden');
 });
-// Changes: what the session's agent changed in its project, as git sees it. Tap a file for its diff, tap a line to send
-// a comment back to the agent, and commit / push / open a pull request without leaving the phone.
-state.changes = { id:'', v:'', data:null, open:new Set(), diffs:new Map() };
+// Changes: what the session's agent changed in its project, as git sees it. Supports Uncommitted vs Whole branch diffs,
+// hidden Git checkpoints with one-tap rewind, batched inline review notes, per-file discard, quick project scripts,
+// cross-harness review, local merge, and commit / push / ship PR.
+state.changes = { id:'', v:'', scope:'uncommitted', data:null, open:new Set(), diffs:new Map(), notes:[], activeLine:null, checkpoints:[], cpDiff:null, scripts:[], scriptRuns:{}, activeScriptId:'', runningScriptId:'' };
 const changesBase = () => `/api/sessions/${encodeURIComponent(state.selectedSession.id)}`;
+function formatBatchedNotes(notes) {
+  const byFile = new Map();
+  for (const n of notes) byFile.set(n.file, [...(byFile.get(n.file) || []), n]);
+  const sections = [...byFile.entries()].map(([file, items]) => `### \`${file}\`\n` + items.map(n => `- **Line ${n.line}**${n.code ? ` (\`${n.code.slice(0, 80)}\`)` : ''}: ${n.comment}`).join('\n'));
+  return `Please address these code review notes (${notes.length}):\n\n${sections.join('\n\n')}`;
+}
+async function loadCheckpoints() {
+  const session = state.selectedSession, c = state.changes;
+  if (!session?.cwd) return;
+  try {
+    const data = await api(`${changesBase()}/checkpoints`);
+    if (state.selectedSession?.id !== session.id) return;
+    c.checkpoints = data.checkpoints || [];
+    if (state.pane === 'changes') renderChanges();
+  } catch { /* checkpoints are extra */ }
+}
+async function loadScripts() {
+  const session = state.selectedSession, c = state.changes;
+  if (!session?.cwd) return;
+  try {
+    const data = await api(`${changesBase()}/scripts`);
+    if (state.selectedSession?.id !== session.id) return;
+    c.scripts = data.scripts || [];
+    c.scriptRuns = data.runs || {};
+    if (state.pane === 'changes') renderChanges();
+  } catch { /* scripts are extra */ }
+}
 async function loadChanges(quiet = false) {
   const session = state.selectedSession, box = $('#drawer-changes');
   if (!session?.cwd) return;
   const c = state.changes;
   if (!c.data && !quiet) box.innerHTML = '<div class="files-empty">Reading git…</div>';
   try {
-    const data = await api(`${changesBase()}/changes?v=${c.v}`);
+    const scopeParam = c.scope === 'branch' ? 'scope=branch&' : '';
+    const data = await api(`${changesBase()}/changes?${scopeParam}v=${c.v}`);
     if (state.selectedSession?.id !== session.id) return;
     if (!data.same) { c.v = data.v; c.data = data; for (const file of c.diffs.keys()) c.diffs.delete(file); }
     const count = c.data.repo ? c.data.files.length : 0;
     $('#changes-count').textContent = count; $('#changes-count').classList.toggle('hidden', !count);
     if (state.pane === 'changes' && (!data.same || !box.dataset.drawn)) { renderChanges(); for (const file of c.open) loadDiff(file); }
     if (state.pane === 'changes' && c.data.repo && (!c.pr || Date.now() - c.pr.at > 20000)) loadPr();
+    if (state.pane === 'changes' && !quiet) { loadCheckpoints(); loadScripts(); }
   } catch (error) { if (!quiet) box.innerHTML = `<div class="files-empty">${escapeHtml(error.message)}</div>`; }
 }
 async function loadPr(fresh = false) {
@@ -881,39 +918,99 @@ function renderPr() {
   line.innerHTML = `<a class="pr-chip ${escapeHtml(pr.state.toLowerCase())}" href="${escapeHtml(pr.url)}" target="_blank" rel="noopener">#${pr.number} ${pr.draft ? 'Draft' : escapeHtml(pr.state[0] + pr.state.slice(1).toLowerCase())} ↗</a>${checks}${failed ? '<button class="text-action" type="button" id="fix-checks">Fix failing checks</button>' : ''}`;
 }
 const commitSubject = session => { const line = topicLine(session.title || '').replace(/…$/, ''); return (line[0] || '').toUpperCase() + line.slice(1, 72); };
+function reviewOptionsFor(session) {
+  const ready = Object.keys(harnessNames).filter(h => state.available[h] && state.health[h]?.state === 'ready');
+  const others = ready.filter(h => h !== session?.harness);
+  return others.length ? others : ready;
+}
 function renderChanges() {
   const c = state.changes, d = c.data, box = $('#drawer-changes'), session = state.selectedSession;
   box.dataset.drawn = '1';
+  if (d.removed) { box.innerHTML = '<div class="files-empty">This worktree was removed.</div>'; return; }
   if (!d.repo) { box.innerHTML = '<div class="files-empty">This project is not a git repository, so there are no changes to review.</div>'; return; }
   const message = $('#commit-message')?.value ?? commitSubject(session);
   const where = d.branch ? `<span class="branch">⎇ ${escapeHtml(d.branch)}</span>` : '<span class="branch">detached checkout</span>';
+  const wtBadge = d.worktree ? '<span class="wt-badge" title="Isolated Shed branch worktree">WORKTREE</span>' : '';
   const sync = d.upstream ? `${d.ahead ? `<span>↑${d.ahead}</span>` : ''}${d.behind ? `<span>↓${d.behind}</span>` : ''}${!d.ahead && !d.behind ? '<span>up to date</span>' : ''}` : d.branch ? '<span>not pushed yet</span>' : '';
+  const reviewers = reviewOptionsFor(session);
+  const prevReviewer = $('#review-harness')?.value;
+  const reviewBar = reviewers.length && (d.files.length || d.worktree || d.ahead)
+    ? `<div class="review-bar"><select id="review-harness" aria-label="Reviewer harness">${reviewers.map(h => `<option value="${h}"${h === prevReviewer ? ' selected' : ''}>${escapeHtml(harnessNames[h] || h)}</option>`).join('')}</select><button class="pill" type="button" id="start-review" title="Start another agent on this checkout to review the diff">Review diff ↗</button></div>`
+    : '';
+  const scopeTabs = `<div class="changes-scopes"><div class="scope-tabs" role="tablist"><button type="button" class="${c.scope === 'uncommitted' ? 'active' : ''}" data-diff-scope="uncommitted">Uncommitted</button><button type="button" class="${c.scope === 'branch' ? 'active' : ''}" data-diff-scope="branch">Whole branch${d.scope === 'branch' && d.commitsAhead ? ` (${d.commitsAhead})` : ''}</button><button type="button" class="${c.scope === 'checkpoints' ? 'active' : ''}" data-diff-scope="checkpoints">Checkpoints${c.checkpoints.length ? ` (${c.checkpoints.length})` : ''}</button></div></div>`;
+  const scriptsBar = c.scripts.length
+    ? `<div class="scripts-bar"><span class="scripts-label">Run</span>${c.scripts.slice(0, 8).map(s => {
+        const run = c.scriptRuns[s.id];
+        const busy = c.runningScriptId === s.id;
+        const cls = busy ? '' : run ? (run.ok ? ' ok' : ' fail') : '';
+        const icon = busy ? '◌' : run ? (run.ok ? '✓' : '✗') : '▶';
+        return `<button type="button" class="script-chip${cls}" data-run-script="${escapeHtml(s.id)}" title="${escapeHtml(s.command)}"${busy ? ' disabled' : ''}>${icon} ${escapeHtml(s.name)}</button>`;
+      }).join('')}</div>`
+    : '';
+  const activeRun = c.activeScriptId ? c.scriptRuns[c.activeScriptId] : null;
+  const scriptOutput = activeRun
+    ? `<div class="script-output"><div class="script-output-head"><b>${escapeHtml(activeRun.name)}</b><span>${activeRun.ok ? 'Passed' : `Failed (exit ${activeRun.code})`} · ${(activeRun.durationMs / 1000).toFixed(1)}s</span>${!activeRun.ok ? `<button type="button" class="send-button" id="send-script-fail">Send failure to agent ↗</button>` : ''}<button type="button" class="text-action" id="close-script-output">Hide</button></div><pre>${escapeHtml(activeRun.output || '(no output)')}</pre></div>`
+    : '';
+  if (c.scope === 'checkpoints') {
+    const cpRows = c.checkpoints.length
+      ? c.checkpoints.map(cp => `<div class="cp-row"><div><b>${escapeHtml(cp.label)}</b><small>${escapeHtml(cp.kind)} · ${escapeHtml(cp.commit.slice(0, 7))} · ${relative(cp.createdAt)}</small></div><div class="cp-actions"><button type="button" class="pill" data-cp-diff="${escapeHtml(cp.id)}">Diff vs now</button><button type="button" class="pill danger" data-cp-revert="${escapeHtml(cp.id)}" data-cp-label="${escapeHtml(cp.label)}">Rewind ↺</button></div></div>`).join('')
+      : '<div class="files-empty">No checkpoints yet. Shed saves a hidden Git checkpoint automatically before and after each Build turn, or tap Save checkpoint now.</div>';
+    const cpDiffHtml = c.cpDiff
+      ? `<div class="cp-diff-panel"><div class="cp-head"><b>Changed since "${escapeHtml(c.cpDiff.label)}"</b><button type="button" class="text-action" id="close-cp-diff">Close</button></div>${c.cpDiff.files.length ? `<div class="changes-summary">${c.cpDiff.files.length} file${c.cpDiff.files.length === 1 ? '' : 's'} <i class="add">+${c.cpDiff.additions}</i> <i class="del">−${c.cpDiff.deletions}</i></div><ul class="compare-card-files">${c.cpDiff.files.map(f => `<li>${escapeHtml(f.status)} ${escapeHtml(f.path)} (+${f.additions} −${f.deletions})</li>`).join('')}</ul>` : '<div class="diff-note">Workspace matches this checkpoint right now.</div>'}</div>`
+      : '';
+    box.innerHTML = `<div class="changes-head"><div class="branch-line">${where}${wtBadge}${sync}</div><div class="pr-line" id="pr-line"></div>${reviewBar}</div>${scopeTabs}${scriptsBar}${scriptOutput}
+      <div class="cp-head"><span class="settings-note">Hidden Git snapshots (never touch git log or stash). Rewinding saves a backup first.</span><button type="button" class="pill" id="save-checkpoint">+ Save checkpoint</button></div>
+      ${cpDiffHtml}<div class="cp-list">${cpRows}</div>`;
+    renderPr();
+    return;
+  }
+  const queueBar = c.notes.length
+    ? `<div class="review-queue" id="review-queue"><span><b>${c.notes.length}</b> review note${c.notes.length === 1 ? '' : 's'} queued across ${new Set(c.notes.map(n => n.file)).size} file${new Set(c.notes.map(n => n.file)).size === 1 ? '' : 's'}</span><button class="send-button" type="button" id="send-review-notes">Send ${c.notes.length} note${c.notes.length === 1 ? '' : 's'} ↗</button><button class="text-action" type="button" id="clear-review-notes">Clear</button></div>`
+    : '';
   const rows = d.files.map(f => {
     const slash = f.path.lastIndexOf('/'), name = f.path.slice(slash + 1), dir = slash >= 0 ? f.path.slice(0, slash + 1) : '';
     const open = c.open.has(f.path);
-    return `<div class="change-row${open ? ' open' : ''}" data-path="${escapeHtml(f.path)}"><button class="change-main" type="button"><span class="change-status s-${f.status === '?' ? 'new' : f.status}">${f.status === '?' ? 'N' : f.status}</span><span class="change-name"><b>${escapeHtml(name)}</b><small>${escapeHtml(f.oldPath ? `from ${f.oldPath}` : dir)}</small></span><span class="change-stat">${f.binary ? '<i>binary</i>' : `${f.additions ? `<i class="add">+${f.additions}</i>` : ''}${f.deletions ? `<i class="del">−${f.deletions}</i>` : ''}`}</span></button><div class="change-diff${open ? '' : ' hidden'}">${open ? diffHtml(f.path) : ''}</div></div>`;
+    const fileNotes = c.notes.filter(n => n.file === f.path).length;
+    return `<div class="change-row${open ? ' open' : ''}" data-path="${escapeHtml(f.path)}"><div class="change-row-head"><button class="change-main" type="button"><span class="change-status s-${f.status === '?' ? 'new' : f.status}">${f.status === '?' ? 'N' : f.status}</span><span class="change-name"><b>${escapeHtml(name)}${fileNotes ? ` <span class="tab-count">${fileNotes}</span>` : ''}</b><small>${escapeHtml(f.oldPath ? `from ${f.oldPath}` : dir)}</small></span><span class="change-stat">${f.binary ? '<i>binary</i>' : `${f.additions ? `<i class="add">+${f.additions}</i>` : ''}${f.deletions ? `<i class="del">−${f.deletions}</i>` : ''}`}</span></button>${c.scope === 'uncommitted' ? `<button class="change-discard" type="button" data-discard-file="${escapeHtml(f.path)}" title="Discard changes to ${escapeHtml(f.path)}" aria-label="Discard ${escapeHtml(f.path)}">↺</button>` : ''}</div><div class="change-diff${open ? '' : ' hidden'}">${open ? diffHtml(f.path) : ''}</div></div>`;
   }).join('');
   const nothing = !d.files.length;
-  box.innerHTML = `<div class="changes-head"><div class="branch-line">${where}${sync}</div><div class="pr-line" id="pr-line"></div></div>
-    ${nothing ? `<div class="files-empty">No uncommitted changes.${d.head ? ` Last commit: <b>${escapeHtml(d.head.subject)}</b>.` : ''}</div>` : `<div class="changes-summary">${d.files.length} file${d.files.length === 1 ? '' : 's'} changed${d.more ? ` (and ${d.more} more)` : ''} <i class="add">+${d.additions}</i> <i class="del">−${d.deletions}</i><button class="text-action" type="button" id="send-back">Send back with a note</button></div><div class="change-list">${rows}</div>`}
-    <form class="ship-box" id="ship-box">${nothing ? '' : `<input id="commit-message" maxlength="200" autocomplete="off" aria-label="Commit message" placeholder="Commit message" value="${escapeHtml(message)}">`}
-      <div class="ship-actions">${nothing ? '' : '<button type="button" class="pill" data-git="commit" title="Commit on this Mac only">Commit</button>'}${d.branch && (!nothing || d.ahead || !d.upstream) ? `<button type="button" class="pill" data-git="push" title="${nothing ? 'Push this branch' : 'Commit, then push this branch'}">Push</button>` : ''}${d.branch ? `<label class="draft-pr" title="Open the pull request as a draft"><input type="checkbox" id="pr-draft"> Draft</label><button type="button" class="send-button" data-git="ship" title="${nothing ? 'Push and open a pull request' : 'Commit, push and open a pull request'}">${nothing ? 'Open PR ↗' : 'Ship PR ↗'}</button>` : ''}</div></form>`;
+  const scopeNote = c.scope === 'branch' && d.baseBranch ? ` vs ${escapeHtml(d.baseBranch)}` : '';
+  const secondary = d.worktree
+    ? `<div class="ship-secondary">${nothing ? '<button type="button" class="pill" data-git="merge" title="Merge this clean branch into the main repository locally">Merge locally</button>' : ''}<button type="button" class="pill danger" data-git="remove-worktree" title="Remove this Shed worktree from disk">Remove worktree</button></div>`
+    : '';
+  box.innerHTML = `<div class="changes-head"><div class="branch-line">${where}${wtBadge}${sync}</div><div class="pr-line" id="pr-line"></div>${reviewBar}</div>${scopeTabs}${scriptsBar}${scriptOutput}${queueBar}
+    ${nothing ? `<div class="files-empty">No ${c.scope === 'branch' ? `changes vs ${escapeHtml(d.baseBranch || 'base branch')}` : 'uncommitted changes'}.${d.head ? ` Last commit: <b>${escapeHtml(d.head.subject)}</b>.` : ''}</div>` : `<div class="changes-summary">${d.files.length} file${d.files.length === 1 ? '' : 's'} changed${scopeNote}${d.more ? ` (and ${d.more} more)` : ''} <i class="add">+${d.additions}</i> <i class="del">−${d.deletions}</i><button class="text-action" type="button" id="send-back">Send back with a note</button></div><div class="change-list">${rows}</div>`}
+    <form class="ship-box" id="ship-box">${nothing || c.scope === 'branch' ? '' : `<input id="commit-message" maxlength="200" autocomplete="off" aria-label="Commit message" placeholder="Commit message" value="${escapeHtml(message)}">`}
+      <div class="ship-actions">${nothing || c.scope === 'branch' ? '' : '<button type="button" class="pill" data-git="commit" title="Commit on this Mac only">Commit</button>'}${d.branch && (!nothing || d.ahead || !d.upstream) ? `<button type="button" class="pill" data-git="push" title="${nothing || c.scope === 'branch' ? 'Push this branch' : 'Commit, then push this branch'}">Push</button>` : ''}${nothing || c.scope === 'branch' ? '' : '<label class="draft-pr" title="Run git pre-commit hooks instead of skipping them"><input type="checkbox" id="git-verify"> Hooks</label>'}${d.branch ? `<label class="draft-pr" title="Open the pull request as a draft"><input type="checkbox" id="pr-draft"> Draft</label><button type="button" class="send-button" data-git="ship" title="${nothing || c.scope === 'branch' ? 'Push and open a pull request' : 'Commit, push and open a pull request'}">${nothing || c.scope === 'branch' ? 'Open PR ↗' : 'Ship PR ↗'}</button>` : ''}</div>${secondary}</form>`;
   renderPr();
 }
 function diffHtml(file) {
-  const diff = state.changes.diffs.get(file);
+  const c = state.changes, diff = c.diffs.get(file);
   if (!diff) return '<div class="diff-note">Loading the diff…</div>';
   if (diff.error) return `<div class="diff-note">${escapeHtml(diff.error)}</div>`;
   if (diff.binary) return '<div class="diff-note">Binary file: no text diff.</div>';
   if (!diff.hunks.length) return '<div class="diff-note">No line changes (only the file mode or name changed).</div>';
-  return `<div class="diff">${diff.hunks.map(h => `<div class="hunk-head">${escapeHtml(h.context || h.header)}</div>${h.lines.map(l => `<div class="dl ${l.t === '+' ? 'add' : l.t === '-' ? 'del' : l.t === '\\' ? 'meta' : ''}" data-line="${l.n ?? l.o ?? ''}"><span class="ln">${l.t === '-' ? l.o : l.n ?? ''}</span><code>${escapeHtml(l.text) || ' '}</code></div>`).join('')}`).join('')}${diff.truncated ? '<div class="diff-note">The diff is too long to show in full here.</div>' : ''}</div>`;
+  const active = c.activeLine?.file === file ? c.activeLine : null;
+  return `<div class="diff">${diff.hunks.map(h => `<div class="hunk-head">${escapeHtml(h.context || h.header)}</div>${h.lines.map(l => {
+    const ln = String(l.n ?? l.o ?? '');
+    const saved = ln ? c.notes.filter(n => n.file === file && String(n.line) === ln) : [];
+    const editing = active && String(active.line) === ln;
+    const savedHtml = saved.map(n => `<div class="line-note-saved"><span>💬 ${escapeHtml(n.comment)}</span><button type="button" data-remove-note="${escapeHtml(n.id)}" aria-label="Remove note">×</button></div>`).join('');
+    const editHtml = editing ? `<div class="line-note-box"><textarea id="inline-note-input" rows="2" placeholder="Comment on ${escapeHtml(file)}:${escapeHtml(ln)}…"></textarea><div class="line-note-actions"><button type="button" class="send-button" data-note-action="queue">Queue note</button><button type="button" class="pill" data-note-action="send-now">Send now</button><button type="button" class="text-action" data-note-action="cancel">Cancel</button></div></div>` : '';
+    return `<div class="dl ${l.t === '+' ? 'add' : l.t === '-' ? 'del' : l.t === '\\' ? 'meta' : ''}${saved.length ? ' noted' : ''}" data-line="${ln}"><span class="ln">${l.t === '-' ? l.o : l.n ?? ''}</span><code>${escapeHtml(l.text) || ' '}</code></div>${savedHtml}${editHtml}`;
+  }).join('')}`).join('')}${diff.truncated ? '<div class="diff-note">The diff is too long to show in full here.</div>' : ''}</div>`;
 }
 async function loadDiff(file) {
   const c = state.changes, id = c.id;
   if (c.diffs.has(file)) return;
-  try { c.diffs.set(file, await api(`${changesBase()}/diff?path=${encodeURIComponent(file)}`)); }
+  const scopeParam = c.scope === 'branch' ? '&scope=branch' : '';
+  try { c.diffs.set(file, await api(`${changesBase()}/diff?path=${encodeURIComponent(file)}${scopeParam}`)); }
   catch (error) { c.diffs.set(file, { error:error.message }); }
   if (state.changes.id !== id) return;
+  const row = [...$$('#drawer-changes .change-row')].find(r => r.dataset.path === file);
+  if (row) row.querySelector('.change-diff').innerHTML = diffHtml(file);
+}
+function redrawFileDiff(file) {
   const row = [...$$('#drawer-changes .change-row')].find(r => r.dataset.path === file);
   if (row) row.querySelector('.change-diff').innerHTML = diffHtml(file);
 }
@@ -927,6 +1024,123 @@ function draftFollowup(text) {
 }
 $('#drawer-changes').addEventListener('click', async e => {
   const c = state.changes;
+  const scopeBtn = e.target.closest('[data-diff-scope]');
+  if (scopeBtn) {
+    const next = scopeBtn.dataset.diffScope;
+    if (next === c.scope) return;
+    c.scope = next; c.v = ''; c.open.clear(); c.diffs.clear(); c.activeLine = null; c.cpDiff = null;
+    if (next === 'checkpoints') { renderChanges(); loadCheckpoints(); }
+    else loadChanges();
+    return;
+  }
+  const runScriptBtn = e.target.closest('[data-run-script]');
+  if (runScriptBtn) {
+    const id = runScriptBtn.dataset.runScript;
+    c.runningScriptId = id; c.activeScriptId = id; renderChanges();
+    try {
+      const { result, runs } = await api(`${changesBase()}/scripts/run`, { method:'POST', body:JSON.stringify({ id }), timeout:100000 });
+      c.scriptRuns = runs || { ...c.scriptRuns, [id]:result };
+      c.runningScriptId = ''; c.activeScriptId = id; renderChanges();
+      showFeedback(result.ok ? `${result.name} passed (${(result.durationMs / 1000).toFixed(1)}s).` : `${result.name} failed (exit ${result.code}).`);
+    } catch (error) { c.runningScriptId = ''; renderChanges(); showFeedback(error.message); }
+    return;
+  }
+  if (e.target.closest('#close-script-output')) { c.activeScriptId = ''; renderChanges(); return; }
+  if (e.target.closest('#send-script-fail')) {
+    const run = c.scriptRuns[c.activeScriptId];
+    if (run) draftFollowup(`Running \`${run.name}\` (\`${run.command}\`) failed with exit code ${run.code}. Fix the cause and re-run it:\n\n\`\`\`\n${run.output.slice(-6000)}\n\`\`\``);
+    return;
+  }
+  if (e.target.closest('#save-checkpoint')) {
+    const label = prompt('Checkpoint label (optional):', 'Manual checkpoint');
+    if (label === null) return;
+    try {
+      const data = await api(`${changesBase()}/checkpoints`, { method:'POST', body:JSON.stringify({ label }) });
+      c.checkpoints = data.checkpoints || c.checkpoints;
+      renderChanges(); showFeedback('Checkpoint saved.');
+    } catch (error) { showFeedback(error.message); }
+    return;
+  }
+  const cpDiffBtn = e.target.closest('[data-cp-diff]');
+  if (cpDiffBtn) {
+    const cp = c.checkpoints.find(x => x.id === cpDiffBtn.dataset.cpDiff);
+    if (!cp) return;
+    cpDiffBtn.disabled = true;
+    try {
+      const diff = await api(`${changesBase()}/checkpoints/${encodeURIComponent(cp.id)}/changes`);
+      c.cpDiff = { ...diff, id:cp.id, label:cp.label };
+      renderChanges();
+    } catch (error) { showFeedback(error.message); cpDiffBtn.disabled = false; }
+    return;
+  }
+  if (e.target.closest('#close-cp-diff')) { c.cpDiff = null; renderChanges(); return; }
+  const cpRevertBtn = e.target.closest('[data-cp-revert]');
+  if (cpRevertBtn) {
+    const cpId = cpRevertBtn.dataset.cpRevert, label = cpRevertBtn.dataset.cpLabel || cpId;
+    if (!confirm(`Rewind workspace files back to "${label}"? Shed saves a backup checkpoint first so you can undo.`)) return;
+    cpRevertBtn.disabled = true;
+    try {
+      const res = await api(`${changesBase()}/checkpoints/${encodeURIComponent(cpId)}/revert`, { method:'POST', timeout:60000 });
+      c.data = res.changes; c.checkpoints = res.checkpoints || c.checkpoints; c.v = ''; c.diffs.clear(); c.open.clear(); c.cpDiff = null;
+      c.scope = 'uncommitted'; renderChanges();
+      showFeedback(`Rewound files to "${label}". Backup saved.`);
+    } catch (error) { showFeedback(error.message); cpRevertBtn.disabled = false; }
+    return;
+  }
+  const discardBtn = e.target.closest('[data-discard-file]');
+  if (discardBtn) {
+    const file = discardBtn.dataset.discardFile;
+    if (!confirm(`Discard all uncommitted changes to "${file}"? This cannot be undone.`)) return;
+    discardBtn.disabled = true;
+    try {
+      const result = await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'discard', file }) });
+      c.data = result.changes; c.v = ''; c.diffs.delete(file); c.open.delete(file);
+      c.notes = c.notes.filter(n => n.file !== file);
+      if (c.activeLine?.file === file) c.activeLine = null;
+      renderChanges(); showFeedback(`Discarded changes to ${file}.`);
+    } catch (error) { showFeedback(error.message); discardBtn.disabled = false; }
+    return;
+  }
+  const removeNote = e.target.closest('[data-remove-note]');
+  if (removeNote) {
+    const id = removeNote.dataset.removeNote;
+    c.notes = c.notes.filter(n => n.id !== id);
+    renderChanges();
+    return;
+  }
+  const noteAction = e.target.closest('[data-note-action]')?.dataset.noteAction;
+  if (noteAction) {
+    const active = c.activeLine;
+    if (noteAction === 'cancel') { c.activeLine = null; if (active) redrawFileDiff(active.file); return; }
+    const text = $('#inline-note-input')?.value.trim() || '';
+    if (!active) return;
+    if (noteAction === 'send-now') {
+      c.activeLine = null; redrawFileDiff(active.file);
+      return draftFollowup(`In \`${active.file}\` line ${active.line}:\n> ${active.code}\n\n${text}`);
+    }
+    if (!text) { $('#inline-note-input')?.focus(); return; }
+    c.notes.push({ id:`n${Date.now()}${Math.random().toString(36).slice(2, 6)}`, file:active.file, line:active.line, code:active.code, comment:text });
+    c.activeLine = null;
+    renderChanges();
+    return;
+  }
+  if (e.target.closest('#send-review-notes')) {
+    if (!c.notes.length) return;
+    const text = formatBatchedNotes(c.notes);
+    c.notes = []; c.activeLine = null; renderChanges();
+    return draftFollowup(text);
+  }
+  if (e.target.closest('#clear-review-notes')) { c.notes = []; c.activeLine = null; renderChanges(); return; }
+  if (e.target.closest('#start-review')) {
+    const button = e.target.closest('#start-review'), harness = $('#review-harness')?.value || 'auto';
+    button.disabled = true; button.textContent = 'Starting review…';
+    try {
+      const { task } = await api(`${changesBase()}/review`, { method:'POST', body:JSON.stringify({ harness }) });
+      state.followTask = task.id; await refresh(); openTask(task.id);
+      showFeedback(`Started ${harnessNames[task.harness] || task.harness} code review.`);
+    } catch (error) { showFeedback(error.message); button.disabled = false; button.textContent = 'Review diff ↗'; }
+    return;
+  }
   const main = e.target.closest('.change-main');
   if (main) {
     const row = main.closest('.change-row'), file = row.dataset.path, diff = row.querySelector('.change-diff');
@@ -935,8 +1149,13 @@ $('#drawer-changes').addEventListener('click', async e => {
   }
   const line = e.target.closest('.dl[data-line]');
   if (line && line.dataset.line) {
-    const file = line.closest('.change-row').dataset.path;
-    return draftFollowup(`In \`${file}\` line ${line.dataset.line}:\n> ${line.querySelector('code').textContent.trim()}\n\n`);
+    const file = line.closest('.change-row').dataset.path, ln = line.dataset.line, code = line.querySelector('code').textContent.trim();
+    const prevFile = c.activeLine?.file;
+    c.activeLine = c.activeLine?.file === file && String(c.activeLine.line) === String(ln) ? null : { file, line:ln, code };
+    if (prevFile && prevFile !== file) redrawFileDiff(prevFile);
+    redrawFileDiff(file);
+    $('#inline-note-input')?.focus();
+    return;
   }
   if (e.target.closest('#send-back')) return draftFollowup('About your changes: ');
   if (e.target.closest('#fix-checks')) {
@@ -947,7 +1166,31 @@ $('#drawer-changes').addEventListener('click', async e => {
   }
   const action = e.target.closest('[data-git]')?.dataset.git;
   if (!action) return;
+  if (action === 'merge') {
+    const removeAfter = confirm(`Merge branch "${c.data.branch}" into your main checkout? Click OK to merge and clean up this worktree, or Cancel to abort.`);
+    if (!removeAfter) return;
+    $$('#ship-box button').forEach(b => { b.disabled = true; });
+    showFeedback('Merging branch into main checkout…');
+    try {
+      const result = await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'merge', removeAfter:true }), timeout:120000 });
+      c.data = result.changes; c.v = ''; c.diffs.clear(); c.open.clear(); renderChanges();
+      showFeedback(`Merged ${result.merge.branch} into ${result.merge.target} (${result.merge.sha}).`);
+      await refresh();
+    } catch (error) { showFeedback(error.message); $$('#ship-box button').forEach(b => { b.disabled = false; }); }
+    return;
+  }
+  if (action === 'remove-worktree') {
+    const dirty = c.data.files.length > 0;
+    if (!confirm(dirty ? `This worktree has ${c.data.files.length} uncommitted change(s). Force-remove it and delete branch "${c.data.branch}"?` : `Remove this worktree and delete branch "${c.data.branch}"?`)) return;
+    $$('#ship-box button').forEach(b => { b.disabled = true; });
+    try {
+      await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'remove-worktree', force:dirty, deleteBranch:true }), timeout:60000 });
+      showFeedback('Worktree removed.'); closeDrawer(); await refresh();
+    } catch (error) { showFeedback(error.message); $$('#ship-box button').forEach(b => { b.disabled = false; }); }
+    return;
+  }
   const message = $('#commit-message')?.value.trim() || '';
+  const verify = Boolean($('#git-verify')?.checked);
   const nothing = !c.data.files.length;
   if (!nothing && action !== 'push' && !message) { $('#commit-message').focus(); return showFeedback('Write a commit message first.'); }
   // "Commit & push" on a clean tree is a plain push; with changes it commits first.
@@ -956,17 +1199,65 @@ $('#drawer-changes').addEventListener('click', async e => {
   showFeedback({ commit:'Committing…', push:'Pushing…', 'ship-no-pr':'Committing and pushing…', ship:'Committing, pushing and opening the pull request…' }[steps]);
   try {
     let result;
-    if (steps === 'ship-no-pr') { await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'commit', message }), timeout:120000 }); result = await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'push' }), timeout:120000 }); }
-    else result = await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action, message, draft:$('#pr-draft')?.checked }), timeout:120000 });
+    if (steps === 'ship-no-pr') { await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'commit', message, verify }), timeout:120000 }); result = await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action:'push' }), timeout:120000 }); }
+    else result = await api(`${changesBase()}/git`, { method:'POST', body:JSON.stringify({ action, message, verify, draft:$('#pr-draft')?.checked }), timeout:120000 });
     c.data = result.changes; c.v = ''; c.diffs.clear(); c.open.clear(); renderChanges();
     if (result.pr?.url) { showFeedback(result.pr.existing ? 'Pushed. The pull request is updated.' : 'Pull request opened.'); loadPr(true); }
     else showFeedback(result.push ? `Pushed ${result.push.branch}.` : `Committed ${result.commit?.sha || ''}.`);
   } catch (error) { showFeedback(error.message); $$('#ship-box button').forEach(b => { b.disabled = false; }); }
 });
+$('#drawer-changes').addEventListener('keydown', e => {
+  if (e.target.id === 'inline-note-input' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    $('#drawer-changes [data-note-action="queue"]')?.click();
+  }
+});
 $('#drawer-changes').addEventListener('submit', e => e.preventDefault());
-setInterval(() => { if (state.pane === 'changes' && !document.hidden && !$('#detail-drawer').classList.contains('hidden') && !$('#ship-box button:disabled')) loadChanges(true); }, 3000);
+setInterval(() => { if (state.pane === 'changes' && !document.hidden && !$('#detail-drawer').classList.contains('hidden') && !$('#ship-box button:disabled') && !state.changes.activeLine) loadChanges(true); }, 3000);
 async function loadBranchSetting() { try { $('#own-branch').checked = (await api('/api/branches')).ownBranch; } catch { /* Settings still work without it. */ } }
 $('#own-branch').addEventListener('change', () => api('/api/branches', { method:'POST', body:JSON.stringify({ ownBranch:$('#own-branch').checked }) }).catch(error => showFeedback(error.message)));
+// Worktree manager in Settings: view all Shed branch worktrees, clean up merged ones in one tap, or remove individually.
+async function loadWorktrees() {
+  const listEl = $('#worktree-list'), actionsEl = $('#worktree-actions');
+  if (!listEl || !actionsEl) return;
+  try {
+    const { worktrees } = await api('/api/worktrees');
+    const merged = worktrees.filter(w => w.merged && !w.dirty);
+    actionsEl.innerHTML = worktrees.length
+      ? `${merged.length ? `<button class="send-button" type="button" id="wt-cleanup">Clean up ${merged.length} merged worktree${merged.length === 1 ? '' : 's'}</button>` : ''}<button class="text-action" type="button" id="wt-refresh">Refresh worktrees (${worktrees.length})</button>`
+      : '<span class="settings-note">No active Shed branch worktrees right now.</span>';
+    listEl.innerHTML = worktrees.map(w => {
+      const tags = [
+        w.merged ? '<span class="wt-tag merged">MERGED</span>' : '',
+        w.dirty ? `<span class="wt-tag dirty">${w.filesCount} UNCOMMITTED</span>` : '<span class="wt-tag">CLEAN</span>',
+        w.ahead ? `<span class="wt-tag">+${w.ahead} ahead</span>` : '',
+      ].filter(Boolean).join('');
+      return `<div class="device-row"><div><b>${escapeHtml(w.repoName)} · ${escapeHtml(w.branch)}${tags}</b><small>${escapeHtml(w.head?.subject || w.path)}${w.head?.date ? ` · ${relative(w.head.date)}` : ''}</small></div><div class="device-actions"><button class="pill danger" type="button" data-wt-remove="${escapeHtml(w.path)}" data-wt-dirty="${w.dirty ? '1' : '0'}" data-wt-branch="${escapeHtml(w.branch)}">Remove</button></div></div>`;
+    }).join('');
+  } catch { listEl.innerHTML = ''; actionsEl.innerHTML = ''; }
+}
+$('#branch-settings')?.addEventListener('click', async e => {
+  if (e.target.closest('#wt-refresh')) return loadWorktrees();
+  if (e.target.closest('#wt-cleanup')) {
+    const btn = e.target.closest('#wt-cleanup'); btn.disabled = true;
+    try {
+      const res = await api('/api/worktrees/cleanup', { method:'POST', body:JSON.stringify({}) });
+      showFeedback(`Removed ${res.removed.length} merged worktree${res.removed.length === 1 ? '' : 's'}.`);
+      loadWorktrees(); refresh();
+    } catch (error) { showFeedback(error.message); btn.disabled = false; }
+    return;
+  }
+  const rm = e.target.closest('[data-wt-remove]');
+  if (rm) {
+    const dirty = rm.dataset.wtDirty === '1', branch = rm.dataset.wtBranch;
+    if (!confirm(dirty ? `Worktree "${branch}" has uncommitted changes. Force-remove it?` : `Remove worktree "${branch}"?`)) return;
+    rm.disabled = true;
+    try {
+      await api('/api/worktrees/remove', { method:'POST', body:JSON.stringify({ path:rm.dataset.wtRemove, force:dirty, deleteBranch:true }) });
+      showFeedback(`Removed ${branch}.`); loadWorktrees(); refresh();
+    } catch (error) { showFeedback(error.message); rm.disabled = false; }
+  }
+});
 // The terminal pane shows either a session's terminal or a harness sign-in window.
 function terminalTarget() {
   if (state.login) return { key:`login:${state.login.harness}`, tty:state.login.tty, url:`/api/harnesses/${state.login.harness}/terminal` };
@@ -1011,7 +1302,7 @@ async function loadTerminal(reset = false) {
   } catch (error) { view.textContent = error.message; }
 }
 function openDrawer() { $('#detail-drawer').classList.remove('hidden'); $('#drawer-backdrop').classList.remove('hidden'); }
-function closeDrawer() { $('#detail-drawer').classList.remove('wide'); state.selectedSession = null; state.selectedTask = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#detail-drawer').classList.add('hidden'); $('#drawer-backdrop').classList.add('hidden'); }
+function closeDrawer() { $('#detail-drawer').classList.remove('wide'); state.selectedSession = null; state.selectedTask = null; state.selectedComparison = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#detail-drawer').classList.add('hidden'); $('#drawer-backdrop').classList.add('hidden'); }
 // A sent message stays visible below the conversation, with its delivery state, until the transcript shows it.
 function pendingMessages(session, messages) {
   const recorded = new Set(messages.filter(m => m.role === 'user').map(m => m.text.replace(/\s+/g, ' ').trim()));
@@ -1047,6 +1338,7 @@ async function openSession(id, silent = false) {
     if (!silent) { state.followupPreviewKey = null; $('#followup-preview').classList.add('hidden'); $('#followup-route').value = 'auto'; $('#followup-model').value = ''; }
     state.selectedSession = session;
     state.selectedTask = null;
+    state.selectedComparison = null;
     $('#end-session').classList.toggle('hidden', !session.canEnd);
     $('#open-talk').classList.toggle('hidden', !talkTargets(session).length);
     $('#end-session').textContent = session.harness === 'codex' && !session.tty ? 'Stop Codex' : 'End session';
@@ -1068,17 +1360,20 @@ async function openSession(id, silent = false) {
     $('#drawer-tabs [data-pane=terminal]').classList.toggle('hidden', !session.tty);
     $('#drawer-tabs [data-pane=files]').classList.toggle('hidden', !session.cwd);
     $('#drawer-tabs [data-pane=changes]').classList.toggle('hidden', !session.cwd);
-    if (!silent) { state.files = { key:'', list:[] }; state.changes = { id:session.id, v:'', data:null, open:new Set(), diffs:new Map() }; $('#changes-count').classList.add('hidden'); showPane('conversation'); if (session.cwd) loadChanges(true); fetchFiles(`/api/sessions/${encodeURIComponent(session.id)}`).then(() => openSession(session.id, true)); }
+    if (!silent) { state.files = { key:'', list:[] }; state.changes = { id:session.id, v:'', scope:'uncommitted', data:null, open:new Set(), diffs:new Map(), notes:[], activeLine:null, checkpoints:[], cpDiff:null, scripts:[], scriptRuns:{}, activeScriptId:'', runningScriptId:'' }; $('#changes-count').classList.add('hidden'); showPane('conversation'); if (session.cwd) loadChanges(true); loadSessionQueue(session.id); fetchFiles(`/api/sessions/${encodeURIComponent(session.id)}`).then(() => openSession(session.id, true)); }
     else if (!session.tty && state.pane === 'terminal') showPane('conversation');
     $('#followup-skip-wrap').classList.toggle('hidden', Boolean(session.tty));
     $('.drawer-composer').classList.remove('hidden');
     const missingGeminiProject = session.harness === 'gemini' && !session.cwd;
-    const blockedByTurn = session.liveState === 'working' && !['codex', 'claude'].includes(session.harness) && !(session.harness === 'antigravity' && session.tty);
+    const isWorking = session.liveState === 'working';
+    const willQueue = isWorking && !['codex', 'claude'].includes(session.harness) && !(session.harness === 'antigravity' && session.tty);
     const harnessReady = state.health[session.harness]?.state === 'ready';
     const canHandOff = !['auto', 'stay', session.harness].includes($('#followup-route').value);
-    $('#followup-send').disabled = (!harnessReady && !canHandOff) || missingGeminiProject || blockedByTurn;
-    $('#followup-prompt').disabled = missingGeminiProject || blockedByTurn;
-    $('#followup-prompt').placeholder = blockedByTurn ? 'This desktop session is working; wait for it to finish' : missingGeminiProject ? 'Original Gemini project path is unavailable' : !harnessReady ? (canHandOff ? 'Send to the handoff you selected…' : `${session.harness} is not ready; restore it or choose a handoff…`) : session.harness === 'codex' && session.liveState !== 'history' && !session.tty ? 'Queue a follow-up for this Codex session…' : session.harness === 'antigravity' && session.agAppOnly ? 'Continue in a new Antigravity Terminal session (carries recent context)…' : session.tty ? `Message ${harnessNames[session.harness] || session.harness}…` : ['claude', 'codex', 'antigravity'].includes(session.harness) ? `Message ${harnessNames[session.harness]} (it reopens in Terminal on the Mac)…` : 'Continue this session…';
+    $('#followup-send').disabled = (!harnessReady && !canHandOff) || missingGeminiProject;
+    $('#followup-send').textContent = willQueue ? 'Queue ↗' : 'Send ↗';
+    $('#followup-steer')?.classList.toggle('hidden', !isWorking || !harnessReady);
+    $('#followup-prompt').disabled = missingGeminiProject;
+    $('#followup-prompt').placeholder = missingGeminiProject ? 'Original Gemini project path is unavailable' : !harnessReady ? (canHandOff ? 'Send to the handoff you selected…' : `${session.harness} is not ready; restore it or choose a handoff…`) : isWorking ? 'Queue a follow-up, or tap Steer ↯ to redirect mid-run…' : session.harness === 'codex' && session.liveState !== 'history' && !session.tty ? 'Queue a follow-up for this Codex session…' : session.harness === 'antigravity' && session.agAppOnly ? 'Continue in a new Antigravity Terminal session (carries recent context)…' : session.tty ? `Message ${harnessNames[session.harness] || session.harness}…` : ['claude', 'codex', 'antigravity'].includes(session.harness) ? `Message ${harnessNames[session.harness]} (it reopens in Terminal on the Mac)…` : 'Continue this session…';
     if (!silent) {
       openDrawer();
       // Scroll once the drawer is visible (a hidden element cannot scroll), and again after late layout such as fonts.
@@ -1097,7 +1392,7 @@ async function openTask(id, silent = false) {
   } catch (error) { if (!silent) showFeedback(error.message); return; }
   renderTask(state.taskDetail.task, silent);
 }
-function renderTask(task, silent = false) { const id = task.id; $('#end-session').classList.add('hidden'); $('#open-talk').classList.add('hidden'); $('#followup-permissions').classList.add('hidden'); if (state.followTask === task.id && task.sessionId && state.sessions.some(s => s.id === task.sessionId)) { state.followTask = null; state.pinBottom = true; return openSession(task.sessionId); } if (!silent) { state.files = { key:'', list:[] }; if (task.cwd) fetchFiles(`/api/tasks/${encodeURIComponent(task.id)}`).then(() => openTask(task.id, true)); } state.selectedTask = id; state.selectedSession = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#drawer-harness').innerHTML = `${symbol(task.harness)} <span style="vertical-align:middle;margin-left:7px">TASK · ${escapeHtml(task.status.toUpperCase())}</span>`; const scroll = $('#drawer-content').scrollTop; const changed = setDrawerContent(`<h2 class="drawer-title">${escapeHtml(task.title)}</h2><div class="drawer-path">${escapeHtml(task.cwd)} · ${relative(task.createdAt)}</div><div class="message"><div class="message-label">ROUTING · ${escapeHtml((task.routeSource || 'local').toUpperCase())}</div><div class="message-body">${escapeHtml(task.routeReason)}${task.handoffFrom ? `\nHanded off from: ${escapeHtml(task.handoffFrom)}` : ''}${task.sessionId ? `\nSession: ${escapeHtml(task.sessionId)}` : ''}${task.waitingOn && task.status === 'running' ? `\nWaiting for your answer in its Terminal tab: ${escapeHtml(task.waitingOn)}` : ''}${task.tty ? `\nTerminal on the Mac: ${escapeHtml(task.tty.replace('/dev/', ''))}${task.permissions === 'skip' ? ' · permissions skipped' : task.permissions === 'default' ? ' · asks before using tools' : " · uses that terminal's own permissions"}` : ''}${task.routeFallbackReason ? `\n${escapeHtml(task.routeFallbackReason)}` : ''}</div></div><div class="message"><div class="message-label">MODEL · ${escapeHtml((task.modelSource || 'harness-default').toUpperCase())}</div><div class="message-body">${escapeHtml(task.model || (task.modelSource === 'session' ? 'Current session model' : 'Harness default'))} · ${escapeHtml(task.modelReason || '')}${task.modelFallbackReason ? `\n${escapeHtml(task.modelFallbackReason)}` : ''}</div></div><div class="message user"><div class="message-label">YOUR PROMPT</div><div class="message-body">${escapeHtml(task.prompt)}${(task.attachments || []).length ? `<ul class="attached-paths">${task.attachments.map(p => `<li title="${escapeHtml(p)}">📎 ${escapeHtml(p.split('/').pop())}<small>${escapeHtml(p)}</small></li>`).join('')}</ul>` : ''}</div></div><div class="message"><div class="message-label">${escapeHtml(task.harness.toUpperCase())} · ${escapeHtml(task.status.toUpperCase())}</div><div class="message-body md">${task.output ? renderMarkdown(task.output) : escapeHtml(task.status === 'running' ? 'Working on it…' : 'No output yet.')}</div>${fileChips(task.output)}</div>${task.error ? `<div class="message"><div class="message-label">DETAILS</div><div class="message-body">${escapeHtml(task.error)}</div></div>` : ''}${task.delivery !== 'queue' && ['running','cancelling'].includes(task.status) ? `<button class="pill" id="cancel-task" ${task.status === 'cancelling' ? 'disabled' : ''}>Cancel task</button>` : ''}${task.sessionId ? `<button class="pill" id="open-task-session" style="margin-left:8px">Open session ↗</button>` : ''}`, !silent); if (!silent) $('#drawer-content').scrollTop = 0; else if (changed) $('#drawer-content').scrollTop = scroll; $('#drawer-tabs').classList.toggle('hidden', !task.tty); $('#drawer-tabs [data-pane=terminal]').classList.toggle('hidden', !task.tty); $('#drawer-tabs [data-pane=files]').classList.add('hidden'); if (!silent || !task.tty) showPane('conversation'); $('.drawer-composer').classList.add('hidden'); if (!silent) openDrawer(); }
+function renderTask(task, silent = false) { const id = task.id; $('#end-session').classList.add('hidden'); $('#open-talk').classList.add('hidden'); $('#followup-permissions').classList.add('hidden'); if (state.followTask === task.id && task.sessionId && state.sessions.some(s => s.id === task.sessionId)) { state.followTask = null; state.pinBottom = true; return openSession(task.sessionId); } if (!silent) { state.files = { key:'', list:[] }; if (task.cwd) fetchFiles(`/api/tasks/${encodeURIComponent(task.id)}`).then(() => openTask(task.id, true)); } state.selectedTask = id; state.selectedSession = null; state.selectedComparison = null; state.login = null; $('#detail-drawer').classList.remove('login-mode'); $('#drawer-harness').innerHTML = `${symbol(task.harness)} <span style="vertical-align:middle;margin-left:7px">TASK · ${escapeHtml(task.status.toUpperCase())}</span>`; const scroll = $('#drawer-content').scrollTop; const changed = setDrawerContent(`<h2 class="drawer-title">${escapeHtml(task.title)}</h2><div class="drawer-path">${escapeHtml(task.cwd)} · ${relative(task.createdAt)}</div><div class="message"><div class="message-label">ROUTING · ${escapeHtml((task.routeSource || 'local').toUpperCase())}</div><div class="message-body">${escapeHtml(task.routeReason)}${task.handoffFrom ? `\nHanded off from: ${escapeHtml(task.handoffFrom)}` : ''}${task.sessionId ? `\nSession: ${escapeHtml(task.sessionId)}` : ''}${task.waitingOn && task.status === 'running' ? `\nWaiting for your answer in its Terminal tab: ${escapeHtml(task.waitingOn)}` : ''}${task.tty ? `\nTerminal on the Mac: ${escapeHtml(task.tty.replace('/dev/', ''))}${task.permissions === 'skip' ? ' · permissions skipped' : task.permissions === 'default' ? ' · asks before using tools' : " · uses that terminal's own permissions"}` : ''}${task.routeFallbackReason ? `\n${escapeHtml(task.routeFallbackReason)}` : ''}</div></div><div class="message"><div class="message-label">MODEL · ${escapeHtml((task.modelSource || 'harness-default').toUpperCase())}</div><div class="message-body">${escapeHtml(task.model || (task.modelSource === 'session' ? 'Current session model' : 'Harness default'))} · ${escapeHtml(task.modelReason || '')}${task.modelFallbackReason ? `\n${escapeHtml(task.modelFallbackReason)}` : ''}</div></div><div class="message user"><div class="message-label">YOUR PROMPT</div><div class="message-body">${escapeHtml(task.prompt)}${(task.attachments || []).length ? `<ul class="attached-paths">${task.attachments.map(p => `<li title="${escapeHtml(p)}">📎 ${escapeHtml(p.split('/').pop())}<small>${escapeHtml(p)}</small></li>`).join('')}</ul>` : ''}</div></div><div class="message"><div class="message-label">${escapeHtml(task.harness.toUpperCase())} · ${escapeHtml(task.status.toUpperCase())}</div><div class="message-body md">${task.output ? renderMarkdown(task.output) : escapeHtml(task.status === 'running' ? 'Working on it…' : 'No output yet.')}</div>${fileChips(task.output)}</div>${task.error ? `<div class="message"><div class="message-label">DETAILS</div><div class="message-body">${escapeHtml(task.error)}</div></div>` : ''}${task.delivery !== 'queue' && ['running','cancelling'].includes(task.status) ? `<button class="pill" id="cancel-task" ${task.status === 'cancelling' ? 'disabled' : ''}>Cancel task</button>` : ''}${task.mode === 'plan' && task.status === 'completed' && task.sessionId ? `<button class="send-button" id="approve-plan" data-plan-session="${escapeHtml(task.sessionId)}" style="margin-left:8px">Approve &amp; execute plan ↗</button>` : ''}${task.sessionId ? `<button class="pill" id="open-task-session" style="margin-left:8px">Open session ↗</button>` : ''}`, !silent); if (!silent) $('#drawer-content').scrollTop = 0; else if (changed) $('#drawer-content').scrollTop = scroll; $('#drawer-tabs').classList.toggle('hidden', !task.tty); $('#drawer-tabs [data-pane=terminal]').classList.toggle('hidden', !task.tty); $('#drawer-tabs [data-pane=files]').classList.add('hidden'); if (!silent || !task.tty) showPane('conversation'); $('.drawer-composer').classList.add('hidden'); if (!silent) openDrawer(); }
 $('#auth-form').addEventListener('submit', async e => { e.preventDefault(); try { const code = pairCode || ($('#auth-pair-code')?.value || '').trim(); const result = await api('/api/auth', { method:'POST', body:JSON.stringify({ password:$('#auth-password').value, pairCode:code }) }); $('#auth-error').textContent = ''; $('#auth-password').value = ''; if ($('#auth-pair-code')) $('#auth-pair-code').value = ''; if (result.status === 'pending') return showWaiting(result.device?.name); await init(); } catch (error) { $('#auth-error').textContent = error.message; } });
 $('#show-password-setup').addEventListener('click', () => { $('#password-setup').classList.toggle('hidden'); $('#setup-password').focus(); });
 $('#password-setup').addEventListener('submit', async e => { e.preventDefault(); const password = $('#setup-password').value; if (password !== $('#setup-password-confirm').value) { $('#auth-error').textContent = 'Passwords do not match.'; return; } try { await api('/api/password/setup', { method:'POST', body:JSON.stringify({ password }) }); $('#auth-error').textContent = 'Password saved. Unlocking…'; await api('/api/auth', { method:'POST', body:JSON.stringify({ password }) }); $('#password-setup').reset(); await init(); } catch (error) { $('#auth-error').textContent = error.message; } });
@@ -1387,7 +1682,210 @@ $('#followup-prompt').addEventListener('keydown', e => {
 // The message box grows with its text, up to a limit.
 function fitComposer() { const box = $('#followup-prompt'); box.style.height = ''; box.style.height = `${Math.min(box.scrollHeight + 2, Math.round(innerHeight * 0.35))}px`; }
 $('#followup-prompt').addEventListener('input', fitComposer);
-document.addEventListener('click', e => { const row = e.target.closest('[data-session]'); if (row) openSession(row.dataset.session); const task = e.target.closest('[data-task]'); if (task) openTask(task.dataset.task); if (e.target.id === 'cancel-task' && state.selectedTask) api(`/api/tasks/${state.selectedTask}/cancel`, { method:'POST' }).then(refresh).catch(err => showFeedback(err.message)); if (e.target.id === 'open-task-session') { const item = state.tasks.find(t => t.id === state.selectedTask); if (item?.sessionId) openSession(item.sessionId); } });
+document.addEventListener('click', e => {
+  const compRow = e.target.closest('[data-compare]');
+  if (compRow) return openComparison(compRow.dataset.compare);
+  const pickBtn = e.target.closest('[data-pick-winner]');
+  if (pickBtn) return pickComparisonWinner(pickBtn.dataset.pickComp, pickBtn.dataset.pickWinner);
+  const row = e.target.closest('[data-session]'); if (row) openSession(row.dataset.session); const task = e.target.closest('[data-task]'); if (task) openTask(task.dataset.task); if (e.target.id === 'cancel-task' && state.selectedTask) api(`/api/tasks/${state.selectedTask}/cancel`, { method:'POST' }).then(refresh).catch(err => showFeedback(err.message)); if (e.target.id === 'open-task-session') { const item = state.tasks.find(t => t.id === state.selectedTask); if (item?.sessionId) openSession(item.sessionId); }
+});
+
+// Fan-out & Compare ("Race Agents"): run one prompt across 2–4 harnesses in parallel worktrees and pick a winner.
+function readyHarnesses() { return Object.keys(harnessNames).filter(h => state.available[h] && state.health[h]?.state === 'ready'); }
+function renderComparePicker() {
+  const picker = $('#compare-picker');
+  if (!picker) return;
+  const ready = readyHarnesses();
+  for (const h of [...state.compareHarnesses]) if (!ready.includes(h)) state.compareHarnesses.delete(h);
+  if (state.compareHarnesses.size < 2 && ready.length >= 2) {
+    for (const h of ready) { state.compareHarnesses.add(h); if (state.compareHarnesses.size >= 2) break; }
+  }
+  const isCompare = state.composerMode === 'compare';
+  picker.classList.toggle('hidden', !isCompare);
+  $('#harness-select')?.closest('.select-wrap')?.classList.toggle('hidden', isCompare);
+  $('#model-select')?.closest('.select-wrap')?.classList.toggle('hidden', isCompare);
+  if (isCompare) {
+    picker.innerHTML = ready.length < 2
+      ? '<span class="compare-picker-label">Need at least 2 ready harnesses to compare side-by-side.</span>'
+      : `<span class="compare-picker-label">Compare in parallel branches (pick 2–4)</span>${ready.map(h => `<label class="compare-chip"><input type="checkbox" value="${h}"${state.compareHarnesses.has(h) ? ' checked' : ''}>${symbol(h)} ${escapeHtml(harnessNames[h] || h)}</label>`).join('')}`;
+  }
+  const btn = $('#send-button');
+  if (btn) btn.innerHTML = isCompare ? `Compare ${Math.max(2, state.compareHarnesses.size)} agents <span>↗</span>` : 'Start session <span>↗</span>';
+}
+$$('[data-composer-mode]').forEach(btn => btn.addEventListener('click', () => {
+  state.composerMode = btn.dataset.composerMode;
+  $$('[data-composer-mode]').forEach(b => b.classList.toggle('active', b === btn));
+  renderComparePicker(); previewRoute();
+}));
+$$('[data-run-mode]').forEach(btn => btn.addEventListener('click', () => {
+  state.runMode = btn.dataset.runMode === 'plan' ? 'plan' : 'build';
+  $$('[data-run-mode]').forEach(b => b.classList.toggle('active', b === btn));
+  $('#prompt').placeholder = state.runMode === 'plan' ? 'Describe what you want planned before editing any files…' : 'What should the new agent work on?';
+}));
+
+// Universal per-session follow-up queue & mid-run steering.
+function renderSessionQueue() {
+  const box = $('#followup-queue'), items = state.queueItems || [];
+  if (!box) return;
+  box.classList.toggle('hidden', !items.length);
+  if (!items.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="followup-queue-head">Queued (${items.length}) — runs automatically when this turn finishes</div>` + items.map(q => `<div class="queue-row"><span>${q.mode === 'plan' ? '[PLAN] ' : ''}${escapeHtml(q.prompt)}</span><button type="button" class="pill" data-steer-queue="${escapeHtml(q.id)}" title="Interrupt current turn and run this now">Steer now ↯</button><button type="button" class="pill" data-cancel-queue="${escapeHtml(q.id)}" aria-label="Remove queued message">×</button></div>`).join('');
+}
+async function loadSessionQueue(sessionId) {
+  if (!sessionId) { state.queueItems = []; return renderSessionQueue(); }
+  try {
+    const { items } = await api(`/api/sessions/${encodeURIComponent(sessionId)}/queue`);
+    if (state.selectedSession?.id === sessionId) { state.queueItems = items || []; renderSessionQueue(); }
+  } catch { state.queueItems = []; renderSessionQueue(); }
+}
+$('#followup-queue')?.addEventListener('click', async e => {
+  const cancel = e.target.closest('[data-cancel-queue]');
+  if (cancel) {
+    try { const res = await api(`/api/queue/${encodeURIComponent(cancel.dataset.cancelQueue)}`, { method:'DELETE' }); state.queueItems = res.items || []; renderSessionQueue(); }
+    catch (error) { showFeedback(error.message); }
+    return;
+  }
+  const steer = e.target.closest('[data-steer-queue]');
+  if (steer && state.selectedSession) {
+    steer.disabled = true;
+    try {
+      await api(`/api/sessions/${encodeURIComponent(state.selectedSession.id)}/steer`, { method:'POST', body:JSON.stringify({ queueId:steer.dataset.steerQueue }) });
+      showFeedback('Steering session with queued message.');
+      loadSessionQueue(state.selectedSession.id); refresh();
+    } catch (error) { showFeedback(error.message); steer.disabled = false; }
+  }
+});
+$('#followup-steer')?.addEventListener('click', async () => {
+  const session = state.selectedSession, prompt = $('#followup-prompt').value.trim();
+  if (!session) return;
+  if (!prompt) { $('#followup-prompt').focus(); return showFeedback('Type a steering message first.'); }
+  const btn = $('#followup-steer'); btn.disabled = true;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(session.id)}/steer`, { method:'POST', body:JSON.stringify({ prompt, mode:$('#followup-mode')?.value || 'build', model:$('#followup-model').value }) });
+    $('#followup-prompt').value = ''; $('#followup-prompt').style.height = '';
+    showFeedback('Interrupted current turn and delivered steering guidance.');
+    await refresh();
+  } catch (error) { showFeedback(error.message); }
+  finally { btn.disabled = false; }
+});
+document.addEventListener('click', async e => {
+  const planBtn = e.target.closest('#approve-plan');
+  if (!planBtn) return;
+  const sid = planBtn.dataset.planSession;
+  if (!sid) return;
+  planBtn.disabled = true;
+  try {
+    await sendTask('The plan looks good — go ahead and implement it now, then verify with tests.', { sessionId:sid, mode:'build', followup:'stay' });
+    showFeedback('Plan approved — implementing now in Build mode.');
+  } catch (error) { showFeedback(error.message); planBtn.disabled = false; }
+});
+$('#compare-picker')?.addEventListener('change', e => {
+  if (e.target.type !== 'checkbox') return;
+  if (e.target.checked) { if (state.compareHarnesses.size >= 4) { e.target.checked = false; return showFeedback('Compare up to 4 harnesses at once.'); } state.compareHarnesses.add(e.target.value); }
+  else state.compareHarnesses.delete(e.target.value);
+  renderComparePicker();
+});
+async function sendComparison(prompt) {
+  const files = attached.new;
+  if (files.some(f => f.status === 'uploading')) { showFeedback('Wait for the files to finish uploading.'); return false; }
+  if (!prompt.trim()) return false;
+  const chosen = [...state.compareHarnesses].filter(h => readyHarnesses().includes(h));
+  if (chosen.length < 2) { showFeedback('Pick at least 2 ready harnesses to compare.'); return false; }
+  const button = $('#send-button'); button.disabled = true;
+  try {
+    const selectedProject = $('#project-select').value;
+    const { comparison } = await api('/api/comparisons', { method:'POST', body:JSON.stringify({
+      prompt, harnesses:chosen,
+      cwd: selectedProject === '__new__' ? '' : selectedProject,
+      newWorkspace: selectedProject === '__new__' ? $('#new-workspace').value : '',
+      skipPermissions: $('#skip-permissions').checked,
+      attachments: files.map(f => f.id),
+    }), timeout:60000 });
+    attached.new = []; renderAttachments('new'); $('#prompt').value = ''; $('#new-workspace').value = '';
+    showFeedback(`Started ${chosen.length} agents in parallel branches.`);
+    await refresh(); openComparison(comparison.id);
+    return true;
+  } catch (error) { showFeedback(error.message); return false; }
+  finally { button.disabled = false; }
+}
+function renderComparisons() {
+  const box = $('#compare-strip');
+  if (!box) return;
+  const recent = (state.comparisons || []).filter(c => c.status !== 'decided' || Date.now() - Date.parse(c.updatedAt || c.createdAt) < 86400000).slice(0, 4);
+  const html = recent.length ? `<div class="talk-head"><h3>Agent comparisons</h3><p>Same prompt, parallel branches. Tap to compare diffs and pick a winner.</p></div>${recent.map(c => `<button class="talk-row ${c.status === 'running' ? 'is-open' : ''}" data-compare="${escapeHtml(c.id)}" type="button"><div class="talk-ends"><b>${escapeHtml(projectName(c.project))}</b><span class="talk-state">${escapeHtml(c.status === 'decided' ? `winner: ${harnessNames[c.winnerHarness] || c.winnerHarness}` : c.status)}</span><span class="time">${relative(c.createdAt)}</span></div><div class="talk-said">${escapeHtml(c.title)}</div><div class="compare-badges">${(c.entries || []).map(e => `<span class="compare-pill${c.winnerTaskId === e.taskId ? ' winner' : ['running', 'queued'].includes(e.status) ? ' running' : ''}">${symbol(e.harness)} ${escapeHtml(harnessNames[e.harness] || e.harness)} · ${escapeHtml(c.winnerTaskId === e.taskId ? 'winner' : e.status)}</span>`).join('')}</div></button>`).join('')}` : '';
+  const print = fingerprint(html);
+  if (box.dataset.print !== print) { box.innerHTML = html; box.dataset.print = print; box.classList.toggle('hidden', !html); }
+}
+async function openComparison(id, silent = false) {
+  try {
+    const { comparison } = await api(`/api/comparisons/${encodeURIComponent(id)}`);
+    if (silent && state.selectedComparison !== id) return;
+    state.selectedComparison = id; state.selectedSession = null; state.selectedTask = null; state.login = null;
+    $('#end-session').classList.add('hidden'); $('#hide-session').classList.add('hidden'); $('#open-talk').classList.add('hidden');
+    $('#followup-permissions').classList.add('hidden'); $('#drawer-tabs').classList.add('hidden'); $('.drawer-composer').classList.add('hidden');
+    $('#detail-drawer').classList.remove('login-mode');
+    showPane('conversation');
+    $('#detail-drawer').classList.add('wide');
+    $('#drawer-harness').innerHTML = `<span class="harness-symbol claude">⇄</span> <span>COMPARE · ${escapeHtml(comparison.status.toUpperCase())}</span>`;
+    const cards = (comparison.entries || []).map(e => {
+      const winner = comparison.winnerTaskId === e.taskId;
+      const diffLine = e.diff
+        ? `<div class="compare-card-diff"><span>${e.diff.filesCount} file${e.diff.filesCount === 1 ? '' : 's'}</span><i class="add">+${e.diff.additions}</i><i class="del">−${e.diff.deletions}</i></div>${e.diff.files?.length ? `<ul class="compare-card-files">${e.diff.files.map(f => `<li>${escapeHtml(f.status === '?' ? 'N' : f.status)} ${escapeHtml(f.path)}</li>`).join('')}</ul>` : ''}`
+        : '<div class="compare-card-meta">No git diff yet.</div>';
+      return `<div class="compare-card${winner ? ' winner' : ''}">
+        <div class="compare-card-head">${symbol(e.harness)}<strong>${escapeHtml(harnessNames[e.harness] || e.harness)}</strong><span class="badge ${escapeHtml(e.status)}" style="margin-left:auto">${escapeHtml(winner ? 'winner' : e.status)}</span></div>
+        <div class="compare-card-meta">${escapeHtml([e.model || 'default model', e.branch || projectName(e.cwd)].filter(Boolean).join(' · '))}</div>
+        ${diffLine}
+        <div class="compare-card-output md">${e.output ? renderMarkdown(e.output) : escapeHtml(e.error || (e.status === 'running' ? 'Working on it…' : 'No reply yet.'))}</div>
+        <div class="compare-card-actions">${e.sessionId ? `<button class="pill" type="button" data-session="${escapeHtml(e.sessionId)}">Open session ↗</button>` : `<button class="pill" type="button" data-task="${escapeHtml(e.taskId)}">View task ↗</button>`}${!comparison.winnerTaskId ? `<button class="send-button" type="button" data-pick-comp="${escapeHtml(comparison.id)}" data-pick-winner="${escapeHtml(e.taskId)}">Pick winner</button>` : ''}</div>
+      </div>`;
+    }).join('');
+    setDrawerContent(`<header class="chat-head"><h2 class="drawer-title">${escapeHtml(projectName(comparison.project))}</h2><p class="chat-topic">${escapeHtml(comparison.title)}</p><div class="drawer-path">${escapeHtml(comparison.entries.length)} agents compared · started ${relative(comparison.createdAt)}</div></header><div class="message user"><div class="message-label">PROMPT</div><div class="message-body">${escapeHtml(comparison.prompt)}</div></div><div class="compare-grid">${cards}</div>`, !silent);
+    if (!silent) openDrawer();
+  } catch (error) { if (!silent) showFeedback(error.message); }
+}
+async function pickComparisonWinner(compId, taskId) {
+  if (!confirm('Keep this branch as the winner and clean up the other comparison worktrees?')) return;
+  try {
+    let res = await api(`/api/comparisons/${encodeURIComponent(compId)}/pick`, { method:'POST', body:JSON.stringify({ taskId, cleanupOthers:true, force:false }), timeout:60000 });
+    if (res.errors?.length && confirm(`${res.errors.length} other worktree(s) had uncommitted changes and were left on disk. Force-remove them now?`)) {
+      res = await api(`/api/comparisons/${encodeURIComponent(compId)}/pick`, { method:'POST', body:JSON.stringify({ taskId, cleanupOthers:true, force:true }), timeout:60000 });
+    }
+    const winner = res.comparison.entries.find(e => e.taskId === taskId);
+    showFeedback(`Picked ${harnessNames[winner?.harness] || 'winner'}${res.cleaned?.length ? ` · cleaned up ${res.cleaned.length} branch${res.cleaned.length === 1 ? '' : 'es'}` : ''}.`);
+    await refresh();
+    if (winner?.sessionId && state.sessions.some(s => s.id === winner.sessionId)) openSession(winner.sessionId);
+    else openComparison(compId);
+  } catch (error) { showFeedback(error.message); }
+}
+
+// GitHub Issue picker: pick an open issue in the selected project to populate the New Session prompt.
+$('#pick-issue-btn')?.addEventListener('click', async () => {
+  const cwd = $('#project-select').value;
+  if (!cwd || cwd === '__new__') return;
+  $('#issue-lead').textContent = `Open issues in ${projectName(cwd)}`;
+  $('#issue-list').innerHTML = '<div class="files-empty">Loading issues from GitHub…</div>';
+  $('#issue-dialog').showModal();
+  try {
+    const data = await api(`/api/issues?cwd=${encodeURIComponent(cwd)}`);
+    if (data.error) { $('#issue-list').innerHTML = `<div class="files-empty">${escapeHtml(data.error)}</div>`; return; }
+    if (!data.issues?.length) { $('#issue-list').innerHTML = '<div class="files-empty">No open GitHub issues found in this repository.</div>'; return; }
+    $('#issue-list').innerHTML = data.issues.map((i, idx) => `<button type="button" class="issue-item" data-issue-idx="${idx}"><div class="issue-item-top"><span class="issue-num">#${i.number}</span><span>${escapeHtml(i.title)}</span></div><div class="issue-item-meta">${i.labels.map(l => `<span class="issue-label">${escapeHtml(l)}</span>`).join('')}${i.author ? `<span>@${escapeHtml(i.author)}</span>` : ''}${i.updatedAt ? `<span>${relative(i.updatedAt)}</span>` : ''}</div></button>`).join('');
+    $('#issue-list')._issues = data.issues;
+  } catch (error) { $('#issue-list').innerHTML = `<div class="files-empty">${escapeHtml(error.message)}</div>`; }
+});
+$('#issue-close')?.addEventListener('click', () => $('#issue-dialog').close());
+$('#issue-dialog')?.addEventListener('click', e => {
+  if (e.target === e.currentTarget) return e.currentTarget.close();
+  const btn = e.target.closest('[data-issue-idx]');
+  if (!btn) return;
+  const issue = $('#issue-list')._issues?.[Number(btn.dataset.issueIdx)];
+  if (!issue) return;
+  $('#prompt').value = `Work on GitHub issue #${issue.number}: ${issue.title}\n${issue.url}\n\n${issue.body || ''}`.trim();
+  $('#issue-dialog').close();
+  $('#prompt').focus();
+  previewRoute();
+});
 document.addEventListener('click', e => { if (e.target.id === 'configure-laya') setView('settings'); });
 $('#test-laya').addEventListener('click', async () => { const el = $('#settings-feedback'); el.textContent = 'Testing the local Laya model…'; el.classList.remove('hidden'); try { const result = await api('/api/laya/test', {method:'POST'}); el.textContent = `${result.model} is running locally. Session and model routing are ready.`; const me = await api('/api/me'); Object.assign(state, me); renderHarnesses(); } catch (error) { el.textContent = `Local model test failed: ${error.message}`; } });
 $('#start-new-session').addEventListener('click', () => { if (matchMedia('(max-width: 700px)').matches) { $('#phone-message-input').focus(); return; } $('#new-session').scrollIntoView({behavior:'smooth'}); setTimeout(() => $('#prompt').focus(), 350); });

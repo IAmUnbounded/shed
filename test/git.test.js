@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { parseStatus, parseNumstat, parseUnifiedDiff, summarizeChecks, changes, fileDiff, commitAll, sessionWorktree } from '../server/git.js';
+import { parseStatus, parseNumstat, parseUnifiedDiff, summarizeChecks, changes, fileDiff, commitAll, discardFile, sessionWorktree, listWorktrees, mergeWorktree, removeWorktree } from '../server/git.js';
 
 function repo() {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'shed-git-')));
@@ -96,4 +96,73 @@ test('a new session gets its own branch and checkout, and a second one does not 
     assert.equal(await sessionWorktree(empty, 'not a repo', { home }), null);
     fs.rmSync(empty, { recursive:true, force:true });
   } finally { fs.rmSync(dir, { recursive:true, force:true }); fs.rmSync(home, { recursive:true, force:true }); }
+});
+
+test('discardFile restores modified/deleted files and removes untracked files, rejecting non-changed paths', async () => {
+  const { dir } = repo();
+  try {
+    fs.writeFileSync(path.join(dir, 'app.js'), 'changed\n');
+    fs.rmSync(path.join(dir, 'gone.txt'));
+    fs.writeFileSync(path.join(dir, 'scratch.txt'), 'temp\n');
+
+    await discardFile(dir, 'app.js');
+    assert.equal(fs.readFileSync(path.join(dir, 'app.js'), 'utf8'), 'one\ntwo\nthree\n');
+
+    await discardFile(dir, 'gone.txt');
+    assert.equal(fs.readFileSync(path.join(dir, 'gone.txt'), 'utf8'), 'bye\n');
+
+    await discardFile(dir, 'scratch.txt');
+    assert.equal(fs.existsSync(path.join(dir, 'scratch.txt')), false);
+
+    assert.equal((await changes(dir)).files.length, 0);
+    await assert.rejects(discardFile(dir, 'app.js'), /no changes/);
+    await assert.rejects(discardFile(dir, '../../etc/hosts'), /no changes/);
+  } finally { fs.rmSync(dir, { recursive:true, force:true }); }
+});
+
+test('worktrees support suffix, listing, local merge, dirty protection, conflict abort, and removal', async () => {
+  const { dir, g } = repo();
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'shed-wt-ops-')));
+  try {
+    const wt = await sessionWorktree(dir, 'Add feature', { home, suffix:'claude' });
+    assert.equal(wt.branch, 'shed/add-feature-claude');
+    assert.equal((await changes(wt.path)).worktree, true);
+    assert.equal((await changes(dir)).worktree, false);
+
+    // Dirty worktree cannot be removed without force or merged before commit
+    fs.writeFileSync(path.join(wt.path, 'feature.js'), 'export const ok = true;\n');
+    await assert.rejects(removeWorktree(wt.path, { home }), /uncommitted change/);
+    await assert.rejects(mergeWorktree(wt.path, { home }), /uncommitted changes/);
+
+    const listedDirty = await listWorktrees({ home });
+    assert.equal(listedDirty.length, 1);
+    assert.equal(listedDirty[0].dirty, true);
+    assert.equal(listedDirty[0].merged, false);
+
+    await commitAll(wt.path, 'Add feature module');
+    const merged = await mergeWorktree(wt.path, { home, removeAfter:true });
+    assert.equal(merged.merged, true);
+    assert.equal(merged.target, 'main');
+    assert.equal(fs.existsSync(path.join(dir, 'feature.js')), true);
+    assert.equal(fs.existsSync(wt.path), false, 'worktree removed after merge');
+    assert.equal((await listWorktrees({ home })).length, 0);
+
+    // Conflicting merge aborts cleanly and leaves main repo untouched
+    const wt2 = await sessionWorktree(dir, 'Conflict test', { home, suffix:'codex' });
+    fs.writeFileSync(path.join(wt2.path, 'app.js'), 'branch change\n');
+    await commitAll(wt2.path, 'Branch edit');
+    fs.writeFileSync(path.join(dir, 'app.js'), 'main change\n');
+    g('add', '-A'); g('commit', '-q', '-m', 'Main edit');
+    await assert.rejects(mergeWorktree(wt2.path, { home }), /Merge conflicts in: app\.js/);
+    assert.equal((await changes(dir)).files.length, 0, 'main repo stays clean after conflict abort');
+
+    // Force-remove works and refuses paths outside Shed Workspaces/branches
+    await assert.rejects(removeWorktree(dir, { home, force:true }), /Only Shed branch worktrees/);
+    const rm = await removeWorktree(wt2.path, { home, force:true, deleteBranch:true });
+    assert.equal(rm.branchDeleted, true);
+    assert.equal(fs.existsSync(wt2.path), false);
+  } finally {
+    fs.rmSync(dir, { recursive:true, force:true });
+    fs.rmSync(home, { recursive:true, force:true });
+  }
 });
