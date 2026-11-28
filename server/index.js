@@ -8,8 +8,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { discoverSessions, publicSession, sessionMessages, codexQueuedProgress, claudeTerminalProgress, findCodexTranscript, antigravityCliTranscriptPath, antigravityRunStatus, antigravityTerminalProgress, findAntigravityTranscript } from './sessions.js';
-import { codexWorkState, terminalIsAsking, terminalState, claudeLiveState, footerMode, activeOnScreen, antigravityLiveState, antigravityConversationForPid } from './live.js';
-import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent, closeTerminalTab, ttyOf, runInTab, canSkipPermissions } from './terminal.js';
+import { codexWorkState, terminalIsAsking, terminalState, parseTerminalScreen, claudeLiveState, footerMode, activeOnScreen, antigravityLiveState, antigravityConversationForPid } from './live.js';
+import { claudeLiveSessions, typeIntoTerminal, readTerminal, openTerminal, pidOnTty, agentInForeground, typeIntoTerminalAsync, readTerminalAsync, openTerminalAsync, stopAgent, closeTerminalTab, ttyOf, processStartMs, runInTab, canSkipPermissions } from './terminal.js';
 import { autoClosePrefs, idleSessions } from './idle.js';
 import { exchangeStore, exchangeSummary, refusal, depthFor, messagePrompt, introductionPrompt, describe } from './exchanges.js';
 import { rankSessions, autoRoutePrefs, routableHarnesses } from './router.js';
@@ -181,23 +181,37 @@ function hideSessions(ids, hide) {
 }
 // Codex runs through a background service and Antigravity can switch or reopen files in its Terminal tab.
 // Shed remembers the Terminal windows it opened (on the task) and treats a session as live while its agent still runs there.
-function trackedTerminals() {
+// macOS reuses TTY names once a tab closes, so we never hijack a TTY already owned by another live session, never let
+// two tasks claim the same TTY, and verify both conversation identity (for Antigravity) and process start time.
+function trackedTerminals(claimedTtys = new Set()) {
   const found = new Map();
+  const seenTty = new Set(claimedTtys);
   for (const task of tasks) {
     if (!['codex', 'antigravity'].includes(task.harness) || task.delivery !== 'terminal' || !task.nativeSessionId || !task.tty) continue;
     const key = `${task.harness}:${task.nativeSessionId}`;
-    if (found.has(key)) continue;
-    found.set(key, { harness:task.harness, tty:task.tty });
+    // Tasks are newest-first: the newest task that used a TTY owns it; an older task on a recycled TTY is ignored.
+    if (seenTty.has(task.tty) || found.has(key)) continue;
+    seenTty.add(task.tty);
+    found.set(key, { harness:task.harness, nativeId:task.nativeSessionId, tty:task.tty, taskAt:Math.max(Date.parse(task.updatedAt) || 0, Date.parse(task.createdAt) || 0) });
   }
   for (const [key, info] of found) {
     const pid = pidOnTty(info.tty, cliProcessNames(info.harness));
-    if (!pid) found.delete(key);
-    else info.pid = pid;
+    if (!pid) { found.delete(key); continue; }
+    // If the process currently on that TTY belongs to a different Antigravity conversation, this TTY was recycled.
+    if (info.harness === 'antigravity') {
+      const liveConv = antigravityConversationForPid(pid);
+      if (liveConv && liveConv !== info.nativeId) { found.delete(key); continue; }
+    }
+    // If the process on this TTY started well after the task ended, macOS recycled the TTY for a newer tab.
+    const started = processStartMs(pid);
+    if (started && info.taskAt && started > info.taskAt + 2 * 60 * 1000) { found.delete(key); continue; }
+    info.pid = pid;
   }
   return found;
 }
 function withTrackedTerminals(list) {
-  const terminals = trackedTerminals();
+  const claimedTtys = new Set(list.filter(s => s.tty && s.liveState !== 'history').map(s => s.tty));
+  const terminals = trackedTerminals(claimedTtys);
   if (!terminals.size) return list;
   return list.map(session => {
     const info = ['codex', 'antigravity'].includes(session.harness) && !session.tty && !session.agAppOnly && terminals.get(session.id);
@@ -217,6 +231,7 @@ function withTrackedTerminals(list) {
 // A new Claude, Codex or Antigravity window can stop at a startup question (trust this folder, onboarding, update, pick an option)
 // before it takes the message. Shed reads the window, keeps the task open while it waits, and tells the person once.
 const STARTUP_PROMPT = /trust|Update available|update now|Press enter|Enter to confirm|Esc to cancel|enter Confirm|enter Toggle|Terms of Service|Choose your color scheme|Allow .*\?|\(y\/n\)|\[y\/n\]|❯\s*1\.|›\s*1\.\s|Would you like|Do you want/i;
+const AG_STARTUP_PROMPT = /trust|Update available|update now|Press enter|Enter to confirm|enter Confirm|enter Toggle|Terms of Service|Choose your color scheme|Allow .*\?|\(y\/n\)|\[y\/n\]|❯\s*1\.|›\s*1\.\s|Would you like|Do you want/i;
 const startupScreens = new Map(); // task id -> last background reading of its window
 function startupPrompt(task) {
   if (!task.tty || Date.now() - Date.parse(task.createdAt) < 12000) return '';
@@ -227,7 +242,8 @@ function startupPrompt(task) {
     readTerminalAsync(task.tty, 16).then(text => { reading.text = text || ''; }).catch(() => {}).finally(() => { reading.at = Date.now(); reading.pending = false; });
   }
   const screen = reading.text;
-  if (!STARTUP_PROMPT.test(screen)) return '';
+  const pattern = task.harness === 'antigravity' ? AG_STARTUP_PROMPT : STARTUP_PROMPT;
+  if (!pattern.test(screen)) return '';
   const waiting = screen.split('\n').map(l => l.trim()).filter(Boolean).slice(-4).join(' · ').slice(0, 220);
   if (!task.waitNotified) {
     task.waitNotified = true;
@@ -386,11 +402,15 @@ function refreshLiveStatus() {
       const screen = terminalState(session.tty, 'codex');
       now.set(session.id, screen.asking ? 'asking' : screen.active ? 'working' : codexWorkState(session.file));
     } else if (session.harness === 'antigravity') {
-      if (!pidOnTty(session.tty, cliProcessNames('antigravity'))) continue;
+      const pid = pidOnTty(session.tty, cliProcessNames('antigravity'));
+      if (!pid) continue;
+      const liveConv = antigravityConversationForPid(pid);
+      if (liveConv && liveConv !== session.nativeId) continue;
       const screen = terminalState(session.tty, 'antigravity');
       const run = antigravityRunStatus(session.nativeId);
       const dbState = antigravityLiveState({ agStatus:run.status || session.agStatus, updatedAt:run.updatedAt || session.updatedAt }, true);
-      now.set(session.id, screen.asking ? 'asking' : dbState || (screen.active ? 'working' : 'open'));
+      const hasRunningTask = tasks.some(t => t.sessionId === session.id && t.status === 'running');
+      now.set(session.id, screen.asking ? 'asking' : dbState || (screen.active || hasRunningTask ? 'working' : 'open'));
     }
   }
   // A live session that started or closed changes the list itself, so pages fetch it again.
@@ -775,10 +795,25 @@ async function autoCloseIdle() {
   autoClosing = true;
   try {
     const claudeLive = claudeLiveSessions();
-    const idle = idleSessions(sessions(true), { hours:prefs.hours, tasks, statusOf:s => s.harness === 'claude' ? claudeLive.get(s.nativeId)?.statusUpdatedAt || 0 : 0 });
+    const idle = idleSessions(sessions(true), {
+      hours:prefs.hours,
+      tasks,
+      statusOf:s => {
+        if (s.harness === 'claude') return claudeLive.get(s.nativeId)?.statusUpdatedAt || 0;
+        if (s.harness === 'antigravity' && s.file) { try { return fs.statSync(s.file).mtimeMs; } catch {} }
+        return 0;
+      },
+    });
     for (const session of idle) {
       const target = endTarget(session);
       if (!target?.pid) continue;
+      // Defense-in-depth: never kill an Antigravity process that belongs to a different conversation or is actively running.
+      if (session.harness === 'antigravity') {
+        const liveConv = antigravityConversationForPid(target.pid);
+        if (liveConv && liveConv !== session.nativeId) continue;
+        const screen = parseTerminalScreen(await readTerminalAsync(session.tty, 18).catch(() => ''), 'antigravity');
+        if (screen.active) continue;
+      }
       const result = await endAgent(target).catch(error => ({ stopped:false, error }));
       if (!result.stopped) { console.error(`Auto-close: ${session.id} did not stop${result.error ? `: ${result.error.message}` : ''}`); continue; }
       cancelSessionTasks(session.id, `Closed after ${prefs.hours} hours without activity.`);
@@ -961,7 +996,9 @@ async function deliverToTerminal(task, route, modelDecision, cwd, agentPrompt, s
       Object.assign(task, { tty:session.tty });
       // Never type a message while the agent shows a question: the Return would pick whatever option is highlighted
       // (for example "No, exit" on a folder-trust question).
-      if (QUESTION_ON_SCREEN.test(await readTerminalAsync(session.tty, 14) || '')) throw new Error(`${harnessName} is waiting for an answer in its Terminal. Answer it from the Terminal tab first, then send your message again.`);
+      const liveScreen = await readTerminalAsync(session.tty, 18) || '';
+      const isAsking = task.harness === 'antigravity' ? parseTerminalScreen(liveScreen, 'antigravity').asking : QUESTION_ON_SCREEN.test(liveScreen);
+      if (isAsking) throw new Error(`${harnessName} is waiting for an answer in its Terminal. Answer it from the Terminal tab first, then send your message again.`);
       // A model picked in the drawer: Claude switches with /model first, and the message follows once it's done.
       if (task.harness === 'claude' && modelDecision.source === 'selected' && terminalModel(modelDecision.model)) {
         await typeIntoTerminalAsync(session.tty, `/model ${modelDecision.model}`, { prompt:true, agent:'claude' });

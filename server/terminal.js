@@ -36,6 +36,18 @@ export function ttyOf(pid) {
   return tty;
 }
 
+// When a PID started (epoch ms), used to tell whether a recycled TTY now belongs to a newer process.
+const startCache = new Map();
+export function processStartMs(pid) {
+  if (!pid) return 0;
+  const hit = startCache.get(pid);
+  if (hit && Date.now() - hit.at < 60000) return hit.ms;
+  const result = spawnSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding:'utf8', timeout:2000 });
+  const ms = Date.parse((result.stdout || '').trim()) || 0;
+  startCache.set(pid, { at:Date.now(), ms });
+  return ms;
+}
+
 // True when `command` is the foreground program in that terminal, so typed text goes to it and not to the shell.
 export function agentInForeground(tty, command) {
   if (!tty) return false;

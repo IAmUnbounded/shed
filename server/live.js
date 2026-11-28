@@ -2,15 +2,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { claudeLiveSessions, ttyOf, readTerminalAsync, canSkipPermissions } from './terminal.js';
+import { parseMenu } from './menu.js';
 
 // Approval prompts and menus end with these lines; a session showing one is waiting on the user.
+// Note: Antigravity CLI shows "esc to cancel" in its footer while *actively running* (the equivalent of Claude's
+// "esc to interrupt"), so bare "esc to cancel" must NOT be treated as an approval prompt for Antigravity.
 const askingPatterns = {
   claude:/Do you want to|Esc to cancel|Enter to confirm|❯\s*1\./,
   codex:/Would you like to|Allow .*\?|Press enter to confirm|esc to cancel|[›❯]\s*1\.\s/i,
-  antigravity:/Do you want to|Allow .*\?|trust this|Proceed\?|\[y\/n\]|\(y\/n\)|enter Confirm|enter Toggle|Esc to cancel|Enter to confirm|Terms of Service|Choose your color scheme|[›❯]\s*1\.\s/i,
+  antigravity:/Do you want to|Allow .*\?|trust this|Proceed\?|\[y\/n\]|\(y\/n\)|enter Confirm|enter Toggle|Enter to confirm|Terms of Service|Choose your color scheme|[›❯]\s*1\.\s/i,
 };
-// Mid-turn, CLIs show "esc to interrupt" in their footer, even while waiting on their own tools or background work.
+// Mid-turn, CLIs show "esc to interrupt" / "Working (" (Claude/Codex) or "esc to cancel" / braille spinner (Antigravity).
 const activePattern = /esc to interrupt|Working \(/i;
+const agActivePattern = /(?:^|\s)esc to cancel(?:\s|$)|esc to interrupt|Working \(|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⡿⣟⣯⣷⣾⣽⣻⢿]\s+\S|○\s+(?:Running|Thinking)\b/im;
+const agIdleFooterPattern = /\?\s*for shortcuts/i;
+const agCancelFooterPattern = /(?:^|\s)esc to cancel(?:\s|$)/i;
 export const activeOnScreen = screen => activePattern.test(screen || '');
 // Claude's footer names its permission mode (Shift+Tab changes it mid-session); with no mode named it asks first.
 // Only a screen showing the input box counts, since a question or menu hides the footer.
@@ -29,18 +35,43 @@ export function antigravityFooterMode(screen) {
   if (/(?:^|\s)auto\s*·/i.test(tail)) return 'auto';
   return '';
 }
+export function parseTerminalScreen(screen, harness) {
+  const text = String(screen || '');
+  if (!harness || !askingPatterns[harness]) return { asking:false, active:false, mode:'' };
+  if (harness === 'antigravity') {
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    const footer = lines.slice(-3).join('\n');
+    const tail = lines.slice(-14).join('\n');
+    const runningInputBox = agCancelFooterPattern.test(footer) && /[─━]{8,}\n>\s*\n[─━]{8,}/m.test(lines.slice(-6).join('\n'));
+    const menu = runningInputBox ? null : parseMenu(text);
+    const asking = !runningInputBox && (Boolean(menu) || askingPatterns.antigravity.test(tail));
+    let active = false;
+    if (!asking) {
+      // Antigravity's bottom footer is authoritative: "esc to cancel" = actively running, "? for shortcuts" = idle/paused.
+      if (agCancelFooterPattern.test(footer)) active = true;
+      else if (agIdleFooterPattern.test(footer)) active = false;
+      else active = agActivePattern.test(tail);
+    }
+    return { asking, active, mode:antigravityFooterMode(text) };
+  }
+  return {
+    asking: askingPatterns[harness].test(text),
+    active: activePattern.test(text),
+    mode: harness === 'claude' ? footerMode(text) : '',
+  };
+}
 // Reading a Terminal window takes about 0.3 seconds. Readings are refreshed in the background (at most every
-// 3 seconds per window) and the last one is returned straight away, so session discovery never waits on Terminal.
+// 1.8 seconds per window) and the last one is returned straight away, so session discovery never waits on Terminal.
 const screenCache = new Map();
 export function terminalState(tty, harness) {
   if (!tty || !askingPatterns[harness]) return { asking:false, active:false };
   const key = `${tty}:${harness}`;
   let entry = screenCache.get(key);
   if (!entry) { entry = { at:0, state:{ asking:false, active:false }, pending:false }; screenCache.set(key, entry); }
-  if (!entry.pending && Date.now() - entry.at > 3000) {
+  if (!entry.pending && Date.now() - entry.at > 1800) {
     entry.pending = true;
-    readTerminalAsync(tty, 14)
-      .then(screen => { entry.state = { asking:askingPatterns[harness].test(screen || ''), active:activePattern.test(screen || ''), mode:harness === 'claude' ? footerMode(screen) : harness === 'antigravity' ? antigravityFooterMode(screen) : '' }; })
+    readTerminalAsync(tty, 18)
+      .then(screen => { entry.state = parseTerminalScreen(screen, harness); })
       .catch(() => {})
       .finally(() => { entry.at = Date.now(); entry.pending = false; });
   }
@@ -66,8 +97,28 @@ export function antigravityLiveState(session, running, now = Date.now()) {
   return '';
 }
 
-// Antigravity CLI keeps open ~/.gemini/antigravity-cli/presence/<id>.lock and conversations/<id>.db (not transcript.jsonl).
-export function antigravityLivePids(files, processes = null) {
+// Parses `ps -axo pid=,args=` for Antigravity processes launched with `--conversation <id>`.
+export function parseAntigravityArgs(output) {
+  const map = new Map();
+  for (const line of String(output || '').split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (!m) continue;
+    const pid = Number(m[1]), args = m[2];
+    if (!/(?:^|\/)(?:agy|antigravity)(?:\s|$)/i.test(args)) continue;
+    const conv = args.match(/--conversation(?:=|\s+)([0-9a-f-]{8,64})/i)?.[1];
+    if (conv) map.set(conv, pid);
+  }
+  return map;
+}
+
+function antigravityArgsPids() {
+  const result = spawnSync('/bin/ps', ['-axo', 'pid=,args='], { encoding:'utf8', timeout:2000, maxBuffer:2 * 1024 * 1024 });
+  return result.status === 0 ? parseAntigravityArgs(result.stdout) : new Map();
+}
+
+// Antigravity CLI keeps open ~/.gemini/antigravity-cli/presence/<id>.lock and conversations/<id>.db (not transcript.jsonl),
+// and also receives `--conversation <id>` on its command line when resumed.
+export function antigravityLivePids(files, processes = null, argsPids = null) {
   const best = new Map();
   for (const [filePath, pid] of files) {
     if (processes && processes.get(pid) !== 'antigravity') continue;
@@ -80,6 +131,12 @@ export function antigravityLivePids(files, processes = null) {
     if (!id) continue;
     const prev = best.get(id);
     if (!prev || priority > prev.priority) best.set(id, { pid, priority });
+  }
+  if (argsPids) {
+    for (const [id, pid] of argsPids) {
+      if (processes && processes.get(pid) !== 'antigravity') continue;
+      if (!best.has(id)) best.set(id, { pid, priority: 2 });
+    }
   }
   return new Map([...best].map(([id, info]) => [id, info.pid]));
 }
@@ -97,7 +154,9 @@ export function antigravityConversationForPid(pid) {
     else if (match[1] === 'brain') { id = match[2]; priority = 1; }
     if (id && priority > bestPriority) { chosen = id; bestPriority = priority; }
   }
-  return chosen;
+  if (chosen) return chosen;
+  const result = spawnSync('/bin/ps', ['-o', 'args=', '-p', String(pid)], { encoding:'utf8', timeout:2000 });
+  return (result.stdout || '').match(/--conversation(?:=|\s+)([0-9a-f-]{8,64})/i)?.[1] || '';
 }
 
 export function parseOpenFiles(output) {
@@ -176,8 +235,8 @@ export function liveSessionStates(sessions) {
   const files = openFiles([...processes.keys()]);
   const statuses = opencodeStatuses(processes);
   const claude = claudeLiveSessions();
-  const agPids = antigravityLivePids(files, processes);
   const hasAntigravity = [...processes.values()].includes('antigravity');
+  const agPids = antigravityLivePids(files, processes, hasAntigravity ? antigravityArgsPids() : null);
   const states = new Map();
   for (const session of sessions) {
     const pid = session.file && files.get(session.file);

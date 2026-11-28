@@ -1292,7 +1292,9 @@ async function loadTerminal(reset = false) {
     state.terminalV = { [target.key]:data.v };
     const { text, menu } = data;
     const screen = text.split('\n').slice(-20).join('\n');
-    $('#terminal-controls').classList.toggle('asking', Boolean(menu) || /Esc to cancel|Enter to confirm|enter Confirm|enter Toggle|Allow .*\?|\(y\/n\)|\[y\/n\]|❯\s*1\.|Would you like to|Press enter to confirm|›\s*1\.\s/i.test(screen));
+    const isAg = state.selectedSession?.harness === 'antigravity' || state.tasks.find(t => t.id === state.selectedTask)?.harness === 'antigravity';
+    const askRe = isAg ? /Do you want to|Enter to confirm|enter Confirm|enter Toggle|Allow .*\?|\(y\/n\)|\[y\/n\]|❯\s*1\.|Would you like to|Press enter to confirm|›\s*1\.\s/i : /Do you want to|Esc to cancel|Enter to confirm|enter Confirm|enter Toggle|Allow .*\?|\(y\/n\)|\[y\/n\]|❯\s*1\.|Would you like to|Press enter to confirm|›\s*1\.\s/i;
+    $('#terminal-controls').classList.toggle('asking', Boolean(menu) || askRe.test(screen));
     renderChoices(menu);
     const atBottom = reset || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
     // A wide desktop drawer shows the terminal exactly as laid out; a phone gets the reflowed version.
